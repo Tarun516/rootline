@@ -9,8 +9,6 @@ This file defines the working rules for coding agents operating anywhere inside 
 - Do not introduce former working names, competitor names, copied branding, external-project revision details, or source-specific comparisons into repository content.
 - Rootline's implementation, schemas, prompts, interface, assets, and documentation must be independently authored.
 
-
-
 ## Current project state
 
 Rootline is currently documentation-first. The accepted material lives in:
@@ -21,7 +19,8 @@ Rootline is currently documentation-first. The accepted material lives in:
 - `docs/02-principles-and-boundaries.md` for non-negotiable constraints;
 - `docs/04-target-architecture.md` for target component boundaries;
 - `docs/05-core-model-and-provenance.md` for the conceptual data model;
-- `docs/09-capability-roadmap.md` and `docs/10-first-90-days.md` for sequencing.
+- `docs/09-capability-roadmap.md` and `docs/10-first-90-days.md` for sequencing;
+- `docs/engineering/rust-engineering-rules.md` for binding Rust implementation rules.
 
 Do not add production implementation merely because the roadmap describes it. Implement only the capability explicitly requested for the current task.
 
@@ -54,8 +53,6 @@ All design and implementation work must preserve these rules:
 10. Default to local processing and repository-scoped file access.
 11. Query and render bounded projections; never treat the complete stored graph as a UI payload.
 12. Add complexity only when tests and measurements justify it.
-
-
 
 ## Target architecture
 
@@ -133,8 +130,6 @@ After changing code:
 4. Report commands run, results, limitations, and unverified behavior.
 5. Update docs and add an ADR if a stable contract or architectural decision changed.
 
-
-
 ## Analysis result requirements
 
 An analysis operation must distinguish:
@@ -173,8 +168,6 @@ Numeric confidence may help ranking but must not replace semantic statuses such 
 - Test that incremental results converge with clean rebuilds.
 - Record why each entity was invalidated, preserved, replaced, or left unresolved.
 
-
-
 ## Language support requirements
 
 A grammar alone does not make a language supported. Declare the support tier and test the complete claimed path:
@@ -187,7 +180,26 @@ A grammar alone does not make a language supported. Declare the support tier and
 - incremental identity and deletion behavior;
 - fixtures, coverage metrics, and known limitations.
 
+## Rust implementation requirements
 
+Before changing Rust code, read `docs/engineering/rust-engineering-rules.md` completely. Its rules are binding unless an accepted ADR explicitly changes them.
+
+In particular:
+
+- Treat borrow-checker and lifetime failures as design feedback. Do not reflexively add `clone()`, `Arc`, `Rc`, `Mutex`, `RwLock`, `RefCell`, `'static`, `Box<dyn Trait>`, async boundaries, or wider visibility merely to make code compile.
+- Use `Path` and `PathBuf` for filesystem paths. Lossy string conversion is for display only, never identity, hashing, persistence, cache keys, or resolution.
+- Keep semantically distinct IDs and source coordinate systems strongly typed. Do not mix byte offsets, line/column positions, or LSP UTF-16 positions through bare integers or ambiguous tuples.
+- Keep Tree-sitter and other parser-specific types inside language-adapter boundaries. Core IR must own its data and remain independent of parser lifetimes.
+- Production engine code must not `unwrap()` or `expect()` values derived from repository, filesystem, configuration, parser, Git, database, or provider input. Bad repositories must produce explicit outcomes, not process panics.
+- Rootline uses safe Rust by default. Do not introduce `unsafe` as a compiler, lifetime, or speculative-performance escape hatch.
+- Keep core parsing, IR, resolution, and graph algorithms runtime-agnostic unless async behavior is fundamental to the contract. Repository-scale concurrency must be bounded, cancellable, memory-aware, and deterministically merged.
+- Never let `HashMap`, `HashSet`, filesystem traversal, or task-completion order define persisted, hashed, snapshot, or user-visible ordering.
+- Use the narrowest visibility possible. New public APIs, public re-exports, crate dependencies, and dependency directions are architectural changes.
+- Start concrete. Do not introduce traits, factories, builders, generic layers, or trait objects for hypothetical extensibility.
+- Do not add dependencies, lint suppressions, or performance-oriented complexity without a specific engineering reason and evidence appropriate to the change.
+- Bug fixes require focused regression tests when reproducible. Rust changes must pass the workspace formatting, checking, linting, and testing gates once those gates exist.
+
+When the first Rust workspace is introduced, implement the machine-enforcement layer described in `docs/engineering/rust-engineering-rules.md` together with the code. Do not add placeholder Cargo/Clippy/CI configuration before a real Rust workspace exists.
 
 ## Testing and benchmarking
 
@@ -215,9 +227,7 @@ Correctness regressions cannot be accepted in exchange for faster benchmarks wit
 - Link technical claims to tests, benchmarks, experiments, or ADRs when those artifacts exist.
 - Update `docs/README.md` when adding, renaming, or removing a document.
 - Use `docs/adrs/template.md` for consequential decisions.
-- Use `docs/engineering/` for learning notes and experiments, not binding decisions.
-
-
+- Use `docs/engineering/` for learning notes and experiments, not binding decisions except where a document is explicitly designated as binding implementation guidance.
 
 ## Repository hygiene
 
@@ -226,8 +236,6 @@ Correctness regressions cannot be accepted in exchange for faster benchmarks wit
 - Keep generated artifacts separate from authored source and document their regeneration path.
 - Prefer deterministic output and stable ordering in snapshots.
 - Avoid adding large binary assets without explicit need and provenance.
-
-
 
 ## Commit and review guidance
 
@@ -240,4 +248,3 @@ Commits should be focused and describe the capability or decision they introduce
 - incremental-analysis impact;
 - documentation and ADR changes;
 - known limitations and follow-up work.
-
