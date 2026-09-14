@@ -22,6 +22,7 @@ This directory is the consolidated product and engineering plan for Rootline. It
 | [glossary.md](glossary.md) | Shared terminology |
 | [adrs/README.md](adrs/README.md) | Architecture decision record process and index |
 | [engineering/README.md](engineering/README.md) | Engineering learning notebook and proposed topics |
+| [engineering/rust-engineering-rules.md](engineering/rust-engineering-rules.md) | Binding Rust implementation rules for ownership, APIs, errors, concurrency, determinism, dependencies, testing, and coding agents |
 
 ## Authority and naming
 
@@ -30,6 +31,7 @@ This directory is the consolidated product and engineering plan for Rootline. It
 - Rootline's architecture and implementation are independently defined by its product principles and validated through reproducible benchmarks.
 - When documents disagree, the non-negotiable principles in [02-principles-and-boundaries.md](02-principles-and-boundaries.md) take precedence over roadmap sequencing.
 - The roadmap is expected to change when experiments and measurements reveal better choices.
+- Rust implementation work must also follow [engineering/rust-engineering-rules.md](engineering/rust-engineering-rules.md) unless an accepted ADR explicitly changes a rule or boundary.
 
 ## Current phase
 
