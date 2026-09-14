@@ -2,6 +2,16 @@
 
 This area is for durable technical learning: mental models, experiments, limitations, and implementation implications. These notes differ from ADRs. An ADR records what Rootline decided; a learning note explains the technical territory that informed decisions.
 
+## Binding implementation guidance
+
+Most files in this directory are learning notes and experiments rather than binding architecture. One exception is:
+
+- [`rust-engineering-rules.md`](rust-engineering-rules.md) — binding Rust implementation rules for humans and coding agents working on Rootline's Rust engine and crates.
+
+The Rust rules complement `AGENTS.md` and `docs/12-engineering-operating-model.md`. They are intentionally more specific about ownership, borrowing, paths, source coordinates, errors, panics, unsafe code, async/concurrency, determinism, dependencies, linting, testing, and common coding-agent failure modes.
+
+When changing Rust code, read those rules before implementation. Consequential exceptions or changes to stable architectural boundaries still require an ADR.
+
 ## Recommended note format
 
 Each note should include:
