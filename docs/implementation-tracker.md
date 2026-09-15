@@ -47,6 +47,12 @@ This file records what has been implemented, when, how it was verified, and what
 - Added public type documentation and targeted comments to the existing inventory crates and CLI for path safety, listing and skip semantics, preliminary classification, Git metadata limits, and presentation boundaries.
 - No runtime behavior or public signatures changed. Verification: Rust formatting, check, Clippy, and tests rerun after the comment update.
 
+### 2026-09-15 10:18 IST — Windows path-test regression
+
+- GitHub Actions Windows reported `path_rejects_escape_and_absolute_input` failing because `/tmp/secret` is rooted but not absolute on Windows; `RepoPath::new` correctly returned `InvalidComponent`.
+- Replaced the platform-assuming assertion with Unix and Windows absolute-path cases and a Windows rooted-but-drive-relative case. Production path validation did not change.
+- Local Linux quality gates passed after the correction; Windows CI result remains to be confirmed after push.
+
 ## Log entry template
 
 ```text

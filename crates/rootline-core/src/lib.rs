@@ -102,10 +102,24 @@ mod tests {
             RepoPath::new(Path::new("../secret")),
             Err(RepoPathError::InvalidComponent)
         );
+        #[cfg(unix)]
         assert_eq!(
             RepoPath::new(Path::new("/tmp/secret")),
             Err(RepoPathError::NotRelative)
         );
+        #[cfg(windows)]
+        {
+            // A Windows absolute path needs both a drive prefix and a root.
+            assert_eq!(
+                RepoPath::new(Path::new(r"C:\secret")),
+                Err(RepoPathError::NotRelative)
+            );
+            // Rooted-but-drive-relative paths are unsafe, but not absolute.
+            assert_eq!(
+                RepoPath::new(Path::new(r"\secret")),
+                Err(RepoPathError::InvalidComponent)
+            );
+        }
         assert_eq!(RepoPath::new(Path::new("")), Err(RepoPathError::Empty));
     }
 }
