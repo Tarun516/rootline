@@ -229,30 +229,46 @@ impl fmt::Display for SymbolKind {
     }
 }
 
-/// Stable file-scoped identity for a symbol: artifact path, kind, lexical
-/// owner chain, and declared name. Line ranges are evidence, not identity, so
-/// they are deliberately excluded: a symbol keeps its identity when lines
-/// shift within a revision scope.
+/// File-scoped declaration identity for a symbol: artifact path, kind,
+/// structural owner chain, declared name, and declaration index.
+///
+/// Three identity layers stay distinct:
+///
+/// - declaration identity (this struct): which source declaration in this
+///   revision scope, including legal redefinitions — the second `def load`
+///   in one scope carries index 1, not index 0;
+/// - semantic name: file, kind, owner names, and declared name without the
+///   index, for human display and cross-tool comparison;
+/// - cross-revision identity: explicitly future work; line ranges are
+///   evidence, not identity, so they are excluded here.
+///
+/// The owner is the parent declaration's identity, not a dotted-name string:
+/// a method of the second `class Model` is owned by that declaration, which
+/// dotted names cannot express. Recursion uses `Box` purely as the
+/// indirection a recursive type requires, not as shared ownership.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SymbolId {
     file: RepoPath,
     kind: SymbolKind,
-    owner: Option<SymbolName>,
+    owner: Option<Box<SymbolId>>,
     name: SymbolName,
+    declaration_index: u32,
 }
 
 impl SymbolId {
     pub fn new(
         file: RepoPath,
         kind: SymbolKind,
-        owner: Option<SymbolName>,
+        owner: Option<SymbolId>,
         name: SymbolName,
+        declaration_index: u32,
     ) -> Self {
         Self {
             file,
             kind,
-            owner,
+            owner: owner.map(Box::new),
             name,
+            declaration_index,
         }
     }
 
@@ -264,12 +280,42 @@ impl SymbolId {
         self.kind
     }
 
-    pub fn owner(&self) -> Option<&SymbolName> {
-        self.owner.as_ref()
+    pub fn owner(&self) -> Option<&SymbolId> {
+        self.owner.as_deref()
     }
 
     pub fn name(&self) -> &SymbolName {
         &self.name
+    }
+
+    /// Which same-name declaration in its scope this is: 0 for the first.
+    /// Assigned in source order by the adapter.
+    pub fn declaration_index(&self) -> u32 {
+        self.declaration_index
+    }
+
+    /// Dotted names of the owner chain, or empty for top-level declarations.
+    /// A display and lookup convenience over the structural owner, never a
+    /// substitute for it.
+    pub fn scope_path(&self) -> String {
+        let mut parts = Vec::new();
+        let mut current = self.owner.as_deref();
+        while let Some(id) = current {
+            parts.push(id.name.as_str());
+            current = id.owner.as_deref();
+        }
+        parts.reverse();
+        parts.join(".")
+    }
+
+    /// Dotted path including this symbol's own name.
+    pub fn full_path(&self) -> String {
+        let scope = self.scope_path();
+        if scope.is_empty() {
+            self.name.as_str().to_owned()
+        } else {
+            format!("{}.{}", scope, self.name.as_str())
+        }
     }
 }
 
@@ -306,6 +352,36 @@ impl Symbol {
     }
 }
 
+/// One name a statement binds: the name as defined in the source module
+/// versus the name bound locally. `from pkg import thing as renamed`
+/// imports `thing` and binds `renamed`; collapsing them loses the
+/// definition being imported, which resolution needs.
+///
+/// For plain imports the imported side is the module path as written
+/// (`a.b` in `import a.b as c`, bound as `c`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedName {
+    imported: String,
+    bound: SymbolName,
+}
+
+impl ImportedName {
+    pub fn new(imported: String, bound: SymbolName) -> Self {
+        Self { imported, bound }
+    }
+
+    /// Name as defined in the source module (or module path, for plain
+    /// imports): the side resolution must look up.
+    pub fn imported(&self) -> &str {
+        &self.imported
+    }
+
+    /// Name bound in the importing scope: the side later lookups use.
+    pub fn bound(&self) -> &SymbolName {
+        &self.bound
+    }
+}
+
 /// Raw import syntax as written, before module resolution. Resolution outcomes
 /// (resolved, ambiguous, unknown, external) belong to the resolver stage, not
 /// to this syntax-level fact.
@@ -314,7 +390,7 @@ pub struct ImportStatement {
     range: SourceRange,
     level: u32,
     module: Option<String>,
-    names: Vec<SymbolName>,
+    names: Vec<ImportedName>,
     is_wildcard: bool,
     is_from: bool,
 }
@@ -329,7 +405,7 @@ impl ImportStatement {
         range: SourceRange,
         level: u32,
         module: Option<String>,
-        names: Vec<SymbolName>,
+        names: Vec<ImportedName>,
         is_wildcard: bool,
         is_from: bool,
     ) -> Self {
@@ -357,9 +433,10 @@ impl ImportStatement {
         self.module.as_deref()
     }
 
-    /// Names bound by this statement: imported identifiers for `from`
-    /// imports, the bound top-level or aliased name for plain imports.
-    pub fn names(&self) -> &[SymbolName] {
+    /// Names this statement binds, each carrying both the imported and the
+    /// locally bound spelling: `from pkg import thing as renamed` imports
+    /// `thing` and binds `renamed`.
+    pub fn names(&self) -> &[ImportedName] {
         &self.names
     }
 
@@ -661,12 +738,9 @@ pub fn validate_module(module: &ParsedModule) -> Result<(), IrValidationError> {
                 name: symbol.id().name().as_str().to_owned(),
             });
         }
-        let key = (
-            symbol.id().kind() as u8,
-            symbol.id().owner().map(SymbolName::as_str),
-            symbol.id().name().as_str(),
-        );
-        if !seen.insert(key) {
+        // Full declaration identities collide only on adapter defects: legal
+        // redefinitions already carry distinct declaration indices.
+        if !seen.insert(symbol.id().clone()) {
             return Err(IrValidationError::DuplicateSymbol {
                 name: symbol.id().name().as_str().to_owned(),
             });
@@ -698,12 +772,26 @@ mod tests {
     }
 
     fn test_symbol(kind: SymbolKind, owner: Option<&str>, name: &str) -> Symbol {
+        test_symbol_at(kind, owner, name, 0)
+    }
+
+    fn test_symbol_at(kind: SymbolKind, owner: Option<&str>, name: &str, index: u32) -> Symbol {
+        let owner_id = owner.map(|owner| {
+            SymbolId::new(
+                test_path(),
+                SymbolKind::Class,
+                None,
+                SymbolName::new(owner).expect("test owner is named"),
+                0,
+            )
+        });
         Symbol::new(
             SymbolId::new(
                 test_path(),
                 kind,
-                owner.map(|owner| SymbolName::new(owner).expect("test owner is named")),
+                owner_id,
                 SymbolName::new(name).expect("test symbol is named"),
+                index,
             ),
             test_range(0, 10, 1, 2),
         )
@@ -745,6 +833,7 @@ mod tests {
             SymbolKind::Method,
             None,
             SymbolName::new("fit").expect("test name is valid"),
+            0,
         );
         assert_eq!(
             Symbol::new(id, test_range(0, 10, 1, 2)),
@@ -811,5 +900,35 @@ mod tests {
             },
         );
         assert!(validate_module(&module).is_ok());
+    }
+
+    #[test]
+    fn redefinitions_carry_distinct_declaration_identities() {
+        // Legal Python: two declarations, two identities, one semantic name.
+        let first = test_symbol_at(SymbolKind::Function, None, "load", 0);
+        let second = test_symbol_at(SymbolKind::Function, None, "load", 1);
+        assert_ne!(first.id(), second.id());
+        assert_eq!(first.id().full_path(), second.id().full_path());
+        let module = ParsedModule::new(
+            test_path(),
+            Language::Python,
+            AnalyzerInfo::new("test", "0.0.0"),
+            AnalysisStatus::Succeeded,
+            ModuleBody {
+                symbols: vec![first, second],
+                ..ModuleBody::default()
+            },
+        );
+        assert!(validate_module(&module).is_ok());
+    }
+
+    #[test]
+    fn scope_paths_derive_from_structural_owners() {
+        let method = test_symbol(SymbolKind::Method, Some("Model"), "fit");
+        assert_eq!(method.id().scope_path(), "Model");
+        assert_eq!(method.id().full_path(), "Model.fit");
+        let top = test_symbol(SymbolKind::Function, None, "train");
+        assert_eq!(top.id().scope_path(), "");
+        assert_eq!(top.id().full_path(), "train");
     }
 }

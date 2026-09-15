@@ -29,3 +29,11 @@ class Outer:
     class Inner:
         def method(self):
             return self
+
+
+def load():
+    return 1
+
+
+def load():
+    return 2

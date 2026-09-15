@@ -16,6 +16,17 @@ This file records what has been implemented, when, how it was verified, and what
 
 ## Chronological log
 
+### 2026-09-15 16:48 IST — Pre-persistence hardening slice
+
+- Fixed Windows CI blockers before they could fossilize: `.gitattributes` pins LF bytes for fixtures/benchmarks, and `RepoPath::to_canonical_string()` gives persistence/tests a platform-independent form (`display()` stays human-only). MSRV now honestly reads `1.98` (the proved toolchain) instead of an untested `1.85` claim.
+- Hardened identity (P0): structural `SymbolId` owners plus declaration indices make legal redefinitions distinct; `validate_module` collides only on full identities; containment derives from structure with no skippable lookup. [ADR 0007](adrs/0007-symbol-declaration-identity.md) supersedes ADR 0004's identity section.
+- Hardened relations (P0/P1): `RelationTarget::{Resolved, Ambiguous}` removes the fake primary (no `to()` to misuse); `Confidence` holds assertion strength only; `Graph::try_new` validates at construction; ambiguous targets require 2+ candidates; nodes carry ranges/analyzers and graphs carry repository/revision metadata. [ADR 0008](adrs/0008-relation-targets-and-validation.md) supersedes the relation/confidence sections of ADR 0004.
+- Fixed correctness bugs: from-import aliases now resolve through the imported name (with a dedicated regression test); submodule probing applies only under `__init__.py` packages; non-UTF-8 path components produce explicit `Unknown` instead of silent drops; import self-edges skip only for imports so recursion edges survive (pinned by a recursive fixture).
+- Restructured the engine: `python/{parse,resolve,builtins}` modules behind a narrowed root API (`mod` + curated `pub use`); CLI updated to the new paths; fixture-heavy adapter/graph suites moved to `crates/rootline-engine/tests/`, CLI boundary tests added at `crates/rootline-cli/tests/cli.rs` (6 tests: usage, exit codes, unsupported, missing/non-UTF-8 inputs).
+- Evidence: 59 tests pass (19 core unit, 14 engine unit, 10 adapter + 10 graph integration, 6 CLI); `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings` clean. Sandbox `/tmp` quota remains exhausted, so tests run with `TMPDIR=~/tmp-rootline`.
+- Known Windows status: path-separator and CRLF causes are fixed by construction (canonical form is separator-free by design; fixtures are LF-pinned), but confirmation awaits the next CI run on this branch.
+- Next gate: SQLite persistence and incremental engine, now building on persistable identities.
+
 ### 2026-09-15 12:45 IST — Python import resolution and symbol graph
 
 - Implemented: `rootline-core::graph` (nodes, relations, confidence states, evidence requirement, publication validation) and `rootline-engine::{resolve, graph}` — package-aware import resolution plus a fact-graph builder emitting containment, import, inheritance, and conservatively resolved call edges with per-fact provenance. Unprovable facts stay visible as `GraphDiagnostic`s, never guessed edges.

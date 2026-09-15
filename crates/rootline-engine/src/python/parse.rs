@@ -24,8 +24,8 @@
 use rootline_core::RepoPath;
 use rootline_core::ir::{
     AnalysisStatus, AnalyzerInfo, ByteOffset, ByteRange, CallReceiver, CallSite, CoordinateError,
-    ImportStatement, Inheritance, IrValidationError, Language, LineNumber, LineRange, ModuleBody,
-    ParseError, ParsedModule, SourceRange, Symbol, SymbolId, SymbolKind, SymbolName,
+    ImportStatement, ImportedName, Inheritance, IrValidationError, Language, LineNumber, LineRange,
+    ModuleBody, ParseError, ParsedModule, SourceRange, Symbol, SymbolId, SymbolKind, SymbolName,
 };
 use std::fmt;
 use std::path::Path;
@@ -161,10 +161,12 @@ impl PythonAdapter {
 /// Accumulates adapter output during one syntax-tree walk.
 struct Extraction {
     file: RepoPath,
-    /// Lexical scope chain from observed nesting, e.g. `Outer.Inner` for a
-    /// method of a nested class. Ownership always comes from this nesting,
-    /// never from textual naming conventions.
+    /// Lexical scope chain from observed nesting. Ownership always comes
+    /// from this nesting, never from textual naming conventions.
     scope: Vec<ScopeFrame>,
+    /// Declarations seen per scope path, kind, and name: the source of
+    /// declaration indices, so legal redefinitions keep distinct identities.
+    seen: std::collections::BTreeMap<(String, SymbolKind, String), u32>,
     symbols: Vec<Symbol>,
     imports: Vec<ImportStatement>,
     calls: Vec<CallSite>,
@@ -185,6 +187,7 @@ impl Extraction {
         Self {
             file,
             scope: Vec::new(),
+            seen: std::collections::BTreeMap::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
             calls: Vec::new(),
@@ -193,20 +196,28 @@ impl Extraction {
         }
     }
 
-    /// Dotted path of enclosing scopes (`None` at module top level).
-    fn owner(&self) -> Result<Option<SymbolName>, PythonAdapterError> {
-        if self.scope.is_empty() {
-            return Ok(None);
-        }
-        let path = self
-            .scope
+    /// Dotted path of enclosing scope names for declaration counting.
+    fn scope_key(&self) -> String {
+        self.scope
             .iter()
             .map(|frame| frame.id.name().as_str())
             .collect::<Vec<_>>()
-            .join(".");
-        SymbolName::new(&path)
-            .map(Some)
-            .map_err(PythonAdapterError::from)
+            .join(".")
+    }
+
+    /// Structural identity of the innermost enclosing scope (`None` at
+    /// module top level).
+    fn owner(&self) -> Option<SymbolId> {
+        self.scope.last().map(|frame| frame.id.clone())
+    }
+
+    /// Declaration index for one more same-name declaration in the current
+    /// scope: 0 for the first, counting up through legal redefinitions.
+    fn declare(&mut self, kind: SymbolKind, name: &str) -> u32 {
+        let key = (self.scope_key(), kind, name.to_owned());
+        let index = self.seen.get(&key).copied().unwrap_or(0);
+        self.seen.insert(key, index.saturating_add(1));
+        index
     }
 
     /// Identity of the innermost enclosing scope (`None` for module top-level
@@ -303,7 +314,8 @@ impl Extraction {
             } else {
                 SymbolKind::Function
             };
-            let id = SymbolId::new(self.file.clone(), symbol_kind, self.owner()?, name);
+            let index = self.declare(symbol_kind, name.as_str());
+            let id = SymbolId::new(self.file.clone(), symbol_kind, self.owner(), name, index);
             self.symbols.push(Symbol::new(id, node_range(node)?)?);
             let frame_id = self
                 .symbols
@@ -327,7 +339,14 @@ impl Extraction {
     fn visit_class(&mut self, node: Node<'_>, source: &str) -> Result<(), PythonAdapterError> {
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = SymbolName::new(node_text(name_node, source)?)?;
-            let id = SymbolId::new(self.file.clone(), SymbolKind::Class, self.owner()?, name);
+            let index = self.declare(SymbolKind::Class, name.as_str());
+            let id = SymbolId::new(
+                self.file.clone(),
+                SymbolKind::Class,
+                self.owner(),
+                name,
+                index,
+            );
             self.symbols.push(Symbol::new(id, node_range(node)?)?);
             let frame_id = self
                 .symbols
@@ -442,8 +461,8 @@ impl Extraction {
             self.imports.push(ImportStatement::new(
                 range,
                 0,
-                Some(module),
-                vec![SymbolName::new(&bound)?],
+                Some(module.clone()),
+                vec![ImportedName::new(module, SymbolName::new(&bound)?)],
                 false,
                 false,
             ));
@@ -465,14 +484,25 @@ impl Extraction {
         let mut names_cursor = node.walk();
         for child in node.children_by_field_name("name", &mut names_cursor) {
             match child.kind() {
-                "dotted_name" => names.push(SymbolName::new(node_text(child, source)?)?),
+                "dotted_name" => {
+                    let text = node_text(child, source)?;
+                    names.push(ImportedName::new(text.to_owned(), SymbolName::new(text)?));
+                }
                 "aliased_import" => {
+                    let target = child.child_by_field_name("name").ok_or(
+                        PythonAdapterError::InvalidNode {
+                            detail: "aliased from-import without target",
+                        },
+                    )?;
                     let alias = child.child_by_field_name("alias").ok_or(
                         PythonAdapterError::InvalidNode {
                             detail: "aliased from-import without alias",
                         },
                     )?;
-                    names.push(SymbolName::new(node_text(alias, source)?)?);
+                    names.push(ImportedName::new(
+                        node_text(target, source)?.to_owned(),
+                        SymbolName::new(node_text(alias, source)?)?,
+                    ));
                 }
                 _ => {}
             }
@@ -596,324 +626,4 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> Result<&'a str, PythonAdapt
         .ok_or(PythonAdapterError::InvalidNode {
             detail: "syntax node range escapes its source",
         })
-}
-
-#[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "fixture I/O and adapter setup failure must fail the test immediately"
-)]
-mod tests {
-    use super::*;
-    use rootline_core::ir::ParsedModule;
-
-    fn fixture_path(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/python")
-            .join(name)
-    }
-
-    fn parse_fixture(name: &str) -> ParsedModule {
-        let source = std::fs::read_to_string(fixture_path(name)).expect("read Python fixture");
-        parse_source(name, &source)
-    }
-
-    pub(super) fn parse_source(name: &str, source: &str) -> ParsedModule {
-        let repo_path = RepoPath::new(Path::new(name)).expect("fixture name is relative");
-        PythonAdapter::new()
-            .expect("adapter builds")
-            .parse(&repo_path, source)
-            .expect("fixture parses without adapter failure")
-    }
-
-    fn symbol_summary(symbol: &Symbol) -> (SymbolKind, Option<&str>, &str) {
-        (
-            symbol.id().kind(),
-            symbol.id().owner().map(SymbolName::as_str),
-            symbol.id().name().as_str(),
-        )
-    }
-
-    fn range_summary(symbol: &Symbol) -> (u32, u32, u32, u32) {
-        let range = symbol.range();
-        (
-            range.bytes().start().get(),
-            range.bytes().end().get(),
-            range.lines().start().get(),
-            range.lines().end().get(),
-        )
-    }
-
-    #[test]
-    fn extracts_symbols_with_lexical_owners() {
-        let module = parse_fixture("symbols_basic.py");
-        assert_eq!(module.status(), &AnalysisStatus::Succeeded);
-        let summary: Vec<_> = module.symbols().iter().map(symbol_summary).collect();
-        assert_eq!(
-            summary,
-            [
-                (SymbolKind::Function, None, "train"),
-                (SymbolKind::Class, None, "Model"),
-                (SymbolKind::Method, Some("Model"), "fit"),
-                (SymbolKind::Method, Some("Model"), "predict"),
-                (SymbolKind::Function, None, "outer"),
-                (SymbolKind::Function, Some("outer"), "inner"),
-                (SymbolKind::Function, None, "served"),
-                (SymbolKind::Class, None, "Outer"),
-                (SymbolKind::Class, Some("Outer"), "Inner"),
-                (SymbolKind::Method, Some("Outer.Inner"), "method"),
-            ]
-        );
-    }
-
-    #[test]
-    fn pins_exact_source_ranges() {
-        // Ranges below were verified against the fixture bytes: each range
-        // starts at the declaration keyword (excluding indentation and
-        // decorators) and ends before the trailing newline, with one-based
-        // inclusive line spans.
-        let module = parse_fixture("symbols_basic.py");
-        let ranges: Vec<_> = module.symbols().iter().map(range_summary).collect();
-        assert_eq!(
-            ranges,
-            [
-                (45, 81, 4, 5),     // train
-                (84, 191, 8, 13),   // Model
-                (101, 141, 9, 10),  // Model.fit
-                (147, 191, 12, 13), // Model.predict
-                (194, 258, 16, 20), // outer
-                (211, 240, 17, 18), // outer.inner
-                (272, 301, 24, 25), // served (decorator on line 23 excluded)
-                (304, 383, 28, 31), // Outer
-                (321, 383, 29, 31), // Outer.Inner
-                (342, 383, 30, 31), // Outer.Inner.method
-            ]
-        );
-        // Byte ranges arrive in deterministic declaration order.
-        let starts: Vec<u32> = ranges.iter().map(|range| range.0).collect();
-        let mut ordered = starts.clone();
-        ordered.sort();
-        assert_eq!(starts, ordered);
-    }
-
-    #[test]
-    fn extracts_import_statements_per_module() {
-        let module = parse_fixture("imports_basic.py");
-        assert_eq!(module.status(), &AnalysisStatus::Succeeded);
-        let summary: Vec<_> = module
-            .imports()
-            .iter()
-            .map(|import| {
-                (
-                    import.level(),
-                    import.module().map(str::to_owned),
-                    import
-                        .names()
-                        .iter()
-                        .map(|name| name.as_str().to_owned())
-                        .collect::<Vec<_>>(),
-                    import.is_wildcard(),
-                    range_of(import.range()),
-                )
-            })
-            .collect();
-        assert_eq!(
-            summary,
-            [
-                (
-                    0,
-                    Some("os".to_owned()),
-                    vec!["os".to_owned()],
-                    false,
-                    (47, 56, 2, 2)
-                ),
-                (
-                    0,
-                    Some("sys".to_owned()),
-                    vec!["system".to_owned()],
-                    false,
-                    (57, 77, 3, 3)
-                ),
-                (
-                    0,
-                    Some("pkg.sub".to_owned()),
-                    vec!["alias".to_owned()],
-                    false,
-                    (78, 101, 4, 4)
-                ),
-                (
-                    0,
-                    Some("pathlib".to_owned()),
-                    vec!["Path".to_owned()],
-                    false,
-                    (103, 127, 6, 6)
-                ),
-                (1, None, vec!["sibling".to_owned()], false, (128, 149, 7, 7)),
-                (
-                    2,
-                    Some("pkg".to_owned()),
-                    vec!["renamed".to_owned()],
-                    false,
-                    (150, 184, 8, 8)
-                ),
-                (
-                    0,
-                    Some("package".to_owned()),
-                    vec!["first".to_owned(), "two".to_owned()],
-                    false,
-                    (185, 225, 9, 9)
-                ),
-                (
-                    0,
-                    Some("module".to_owned()),
-                    vec![],
-                    true,
-                    (226, 246, 10, 10)
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn recovers_partial_status_from_syntax_errors() {
-        let module = parse_fixture("syntax_error.py");
-        match module.status() {
-            AnalysisStatus::Partial { .. } => {}
-            status => panic!("expected partial status, got {status}"),
-        }
-        // Intact declarations survive recovery.
-        let names: Vec<_> = module
-            .symbols()
-            .iter()
-            .map(|symbol| symbol.id().name().as_str())
-            .collect();
-        assert_eq!(names, ["healthy", "broken"]);
-        // The error location points at the broken line with real coordinates.
-        assert_eq!(module.parse_errors().len(), 1);
-        let error = &module.parse_errors()[0];
-        assert_eq!(error.range().lines().start().get(), 8);
-        assert_eq!(error.range().lines().end().get(), 8);
-    }
-
-    #[test]
-    fn empty_file_succeeds_with_no_symbols() {
-        // An empty successful result is only meaningful with a Succeeded
-        // status: status and content are asserted together, never inferred
-        // from content alone.
-        let module = parse_fixture("empty.py");
-        assert_eq!(module.status(), &AnalysisStatus::Succeeded);
-        assert!(module.symbols().is_empty());
-        assert!(module.imports().is_empty());
-        assert!(module.parse_errors().is_empty());
-    }
-
-    #[test]
-    fn python_extension_support_is_explicit() {
-        assert!(supports_extension(Path::new("src/module.py")));
-        assert!(!supports_extension(Path::new("src/module.pyi")));
-        assert!(!supports_extension(Path::new("src/module.ts")));
-        assert!(!supports_extension(Path::new("src/module")));
-    }
-
-    #[test]
-    fn provenance_identifies_adapter_and_version() {
-        let module = parse_fixture("symbols_basic.py");
-        assert_eq!(module.language(), Language::Python);
-        assert_eq!(module.analyzer().name(), ADAPTER_NAME);
-        assert_eq!(module.analyzer().version(), ADAPTER_VERSION);
-    }
-
-    fn range_of(range: SourceRange) -> (u32, u32, u32, u32) {
-        (
-            range.bytes().start().get(),
-            range.bytes().end().get(),
-            range.lines().start().get(),
-            range.lines().end().get(),
-        )
-    }
-}
-
-#[cfg(test)]
-mod call_tests {
-    use super::tests::parse_source;
-    use rootline_core::ir::CallReceiver;
-
-    const SOURCE: &str = "import os\n\
-        \n\
-        \n\
-        class Base:\n\
-        \x20   pass\n\
-        \n\
-        \n\
-        class Child(Base, mix.Mixin, Generic[T], metaclass=Meta):\n\
-        \x20   def run(self):\n\
-        \x20       train()\n\
-        \x20       self.run()\n\
-        \x20       os.remove(item)\n\
-        \x20       factory().make()\n\
-        \n\
-        \n\
-        configure()\n";
-
-    fn receiver_label(receiver: &CallReceiver) -> String {
-        match receiver {
-            CallReceiver::Absent => "-".to_owned(),
-            CallReceiver::Named(name) => name.as_str().to_owned(),
-            CallReceiver::Opaque => "?".to_owned(),
-        }
-    }
-
-    #[test]
-    fn extracts_call_shapes_with_callers() {
-        let module = parse_source("calls.py", SOURCE);
-        let calls: Vec<_> = module
-            .calls()
-            .iter()
-            .map(|call| {
-                (
-                    call.caller()
-                        .map(|caller| caller.name().as_str().to_owned()),
-                    receiver_label(call.receiver()),
-                    call.name().as_str().to_owned(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            calls,
-            [
-                (Some("run".to_owned()), "-".to_owned(), "train".to_owned()),
-                (Some("run".to_owned()), "self".to_owned(), "run".to_owned()),
-                (Some("run".to_owned()), "os".to_owned(), "remove".to_owned()),
-                // `factory().make()` yields both calls: the inner bare
-                // `factory()` and the outer opaquely-qualified `make()`.
-                (Some("run".to_owned()), "-".to_owned(), "factory".to_owned()),
-                (Some("run".to_owned()), "?".to_owned(), "make".to_owned()),
-                (None, "-".to_owned(), "configure".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn extracts_plain_bases_and_skips_exotic_ones() {
-        let module = parse_source("calls.py", SOURCE);
-        let bases: Vec<_> = module
-            .inheritances()
-            .iter()
-            .map(|inheritance| {
-                (
-                    inheritance.class().name().as_str().to_owned(),
-                    inheritance.base().to_owned(),
-                )
-            })
-            .collect();
-        // `Generic[T]` (subscript) and `metaclass=Meta` (keyword) are
-        // recorded nowhere: raw text would manufacture bogus externals.
-        assert_eq!(
-            bases,
-            [
-                ("Child".to_owned(), "Base".to_owned()),
-                ("Child".to_owned(), "mix.Mixin".to_owned()),
-            ]
-        );
-    }
 }

@@ -4,7 +4,9 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+# No backdated MSRV promise: the floor is the pinned toolchain CI proves.
+# Lower it only with a CI job that actually builds that version.
+rust-version = "1.98"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

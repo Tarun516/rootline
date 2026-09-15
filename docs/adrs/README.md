@@ -35,3 +35,5 @@ Architecture decision records explain consequential choices and preserve the con
 | [0004-code-intelligence-ir.md](0004-code-intelligence-ir.md) | Owned language-neutral IR in `rootline-core` with typed coordinates, identities, and outcomes |
 | [0005-tree-sitter-packaging.md](0005-tree-sitter-packaging.md) | Tree-sitter runtime plus crates.io grammar crates contained inside language adapters |
 | [0006-python-module-resolution.md](0006-python-module-resolution.md) | Python import resolution over an explicit file set with visible ambiguous/unknown/external outcomes |
+| [0007-symbol-declaration-identity.md](0007-symbol-declaration-identity.md) | Structural owners and declaration indices; semantic name vs declaration vs cross-revision identity |
+| [0008-relation-targets-and-validation.md](0008-relation-targets-and-validation.md) | Relation targets without fake primaries, separated confidence, validating graph construction |

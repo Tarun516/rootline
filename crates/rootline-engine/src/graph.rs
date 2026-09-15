@@ -30,11 +30,13 @@ use std::fmt;
 
 use rootline_core::RepoPath;
 use rootline_core::graph::{
-    Confidence, Graph, GraphValidationError, NodeId, Relation, RelationKind,
+    Confidence, Graph, GraphMetadata, GraphValidationError, NodeId, NodeInfo, Relation,
+    RelationKind, RelationTarget,
 };
 use rootline_core::ir::{AnalyzerInfo, ParsedModule, SourceRange, Symbol, SymbolId, SymbolKind};
 
-use crate::resolve::{ModuleIndex, Resolution};
+use crate::python::BUILTIN_NAMES;
+use crate::python::resolve::{ModuleIndex, Resolution};
 
 /// Identity of the graph-construction stage for provenance records.
 /// Parsing facts carry the adapter's identity; graph facts carry this one.
@@ -123,7 +125,13 @@ fn import_subject(import: &rootline_core::ir::ImportStatement) -> String {
     let names = import
         .names()
         .iter()
-        .map(|name| name.as_str())
+        .map(|name| {
+            if name.imported() == name.bound().as_str() {
+                name.imported().to_owned()
+            } else {
+                format!("{} as {}", name.imported(), name.bound().as_str())
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     if import.is_from() {
@@ -132,8 +140,26 @@ fn import_subject(import: &rootline_core::ir::ImportStatement) -> String {
         } else {
             format!("from {dots}{module} import {names}")
         }
+    } else if let Some(first) = import.names().first() {
+        let bound = first.bound().as_str();
+        let top = module.split('.').next().unwrap_or_default();
+        if bound == top {
+            format!("import {module}")
+        } else {
+            format!("import {module} as {bound}")
+        }
     } else {
         format!("import {module}")
+    }
+}
+
+/// Names one bound name with both spellings for diagnostic reasons:
+/// `'thing'`, or `'thing' bound as 'renamed'` when aliased.
+fn name_render(name: &rootline_core::ir::ImportedName) -> String {
+    if name.imported() == name.bound().as_str() {
+        format!("'{}'", name.imported())
+    } else {
+        format!("'{}' bound as '{}'", name.imported(), name.bound().as_str())
     }
 }
 
@@ -147,152 +173,6 @@ fn call_subject(call: &rootline_core::ir::CallSite) -> String {
         rootline_core::ir::CallReceiver::Opaque => format!("?.{}()", call.name().as_str()),
     }
 }
-/// Language builtins: names the runtime always binds, stable across
-/// releases, and therefore outside the analyzed universe rather than
-/// unknown. Consulted only after file scope and imports fail, so a
-/// repository definition always shadows correctly.
-const BUILTIN_NAMES: &[&str] = &[
-    "ArithmeticError",
-    "AssertionError",
-    "AttributeError",
-    "BaseException",
-    "BlockingIOError",
-    "BrokenPipeError",
-    "BufferError",
-    "BytesWarning",
-    "ChildProcessError",
-    "ConnectionAbortedError",
-    "ConnectionError",
-    "ConnectionRefusedError",
-    "ConnectionResetError",
-    "DeprecationWarning",
-    "EOFError",
-    "Ellipsis",
-    "Exception",
-    "False",
-    "FileExistsError",
-    "FileNotFoundError",
-    "FloatingPointError",
-    "FutureWarning",
-    "GeneratorExit",
-    "ImportError",
-    "ImportWarning",
-    "IndentationError",
-    "IndexError",
-    "InterruptedError",
-    "IsADirectoryError",
-    "KeyError",
-    "KeyboardInterrupt",
-    "LookupError",
-    "MemoryError",
-    "ModuleNotFoundError",
-    "NameError",
-    "None",
-    "NotADirectoryError",
-    "NotImplemented",
-    "NotImplementedError",
-    "OSError",
-    "OverflowError",
-    "PendingDeprecationWarning",
-    "PermissionError",
-    "ProcessLookupError",
-    "RecursionError",
-    "ReferenceError",
-    "ResourceWarning",
-    "RuntimeError",
-    "RuntimeWarning",
-    "StopAsyncIteration",
-    "StopIteration",
-    "SyntaxError",
-    "SyntaxWarning",
-    "SystemError",
-    "SystemExit",
-    "TabError",
-    "TimeoutError",
-    "True",
-    "TypeError",
-    "UnboundLocalError",
-    "UnicodeDecodeError",
-    "UnicodeEncodeError",
-    "UnicodeError",
-    "UnicodeTranslateError",
-    "UnicodeWarning",
-    "UserWarning",
-    "ValueError",
-    "Warning",
-    "ZeroDivisionError",
-    "abs",
-    "aiter",
-    "all",
-    "anext",
-    "any",
-    "ascii",
-    "bin",
-    "bool",
-    "breakpoint",
-    "bytearray",
-    "bytes",
-    "callable",
-    "chr",
-    "classmethod",
-    "compile",
-    "complex",
-    "delattr",
-    "dict",
-    "dir",
-    "divmod",
-    "enumerate",
-    "eval",
-    "exec",
-    "filter",
-    "float",
-    "format",
-    "frozenset",
-    "getattr",
-    "globals",
-    "hasattr",
-    "hash",
-    "help",
-    "hex",
-    "id",
-    "input",
-    "int",
-    "isinstance",
-    "issubclass",
-    "iter",
-    "len",
-    "list",
-    "locals",
-    "map",
-    "max",
-    "memoryview",
-    "min",
-    "next",
-    "object",
-    "oct",
-    "open",
-    "ord",
-    "pow",
-    "print",
-    "property",
-    "range",
-    "repr",
-    "reversed",
-    "round",
-    "set",
-    "setattr",
-    "slice",
-    "sorted",
-    "staticmethod",
-    "str",
-    "sum",
-    "super",
-    "tuple",
-    "type",
-    "vars",
-    "zip",
-];
-
 /// Builds a validated fact graph from parsed modules.
 ///
 /// Modules are processed in file order regardless of input order, so the
@@ -306,8 +186,9 @@ const BUILTIN_NAMES: &[&str] = &[
 pub fn build(
     modules: &[ParsedModule],
     index: &ModuleIndex,
+    metadata: GraphMetadata,
 ) -> Result<ResolvedGraph, GraphValidationError> {
-    let mut builder = Builder::new(index);
+    let mut builder = Builder::new(index, metadata);
     let mut ordered: Vec<&ParsedModule> = modules.iter().collect();
     ordered.sort_by(|a, b| a.file().cmp(b.file()));
     for module in &ordered {
@@ -331,30 +212,19 @@ struct SymbolRecord {
     parent: String,
     /// Full dotted path including the symbol's own name.
     full: String,
+    range: SourceRange,
+    analyzer: AnalyzerInfo,
 }
 
 impl SymbolRecord {
-    fn of(file: &RepoPath, symbol: &Symbol) -> Self {
-        let parent = symbol
-            .id()
-            .owner()
-            .map(|owner| owner.as_str().to_owned())
-            .unwrap_or_default();
-        let full = if parent.is_empty() {
-            symbol.id().name().as_str().to_owned()
-        } else {
-            format!("{}.{}", parent, symbol.id().name().as_str())
-        };
+    fn of(symbol: &Symbol, range: SourceRange, analyzer: AnalyzerInfo) -> Self {
         Self {
-            id: SymbolId::new(
-                file.clone(),
-                symbol.id().kind(),
-                symbol.id().owner().cloned(),
-                symbol.id().name().clone(),
-            ),
+            id: symbol.id().clone(),
             kind: symbol.id().kind(),
-            parent,
-            full,
+            parent: symbol.id().scope_path(),
+            full: symbol.id().full_path(),
+            range,
+            analyzer,
         }
     }
 }
@@ -384,6 +254,7 @@ struct FileImports {
 
 struct Builder<'a> {
     index: &'a ModuleIndex,
+    metadata: GraphMetadata,
     analyzer: AnalyzerInfo,
     symbols: Vec<SymbolRecord>,
     by_file: BTreeMap<RepoPath, Vec<usize>>,
@@ -394,9 +265,10 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(index: &'a ModuleIndex) -> Self {
+    fn new(index: &'a ModuleIndex, metadata: GraphMetadata) -> Self {
         Self {
             index,
+            metadata,
             analyzer: AnalyzerInfo::new(GRAPH_BUILDER_NAME, GRAPH_BUILDER_VERSION),
             symbols: Vec::new(),
             by_file: BTreeMap::new(),
@@ -410,9 +282,9 @@ impl<'a> Builder<'a> {
     /// Indexes every symbol so cross-file lookups see complete tables.
     fn register_symbols(&mut self, module: &ParsedModule) {
         let file = module.file().clone();
-        let entry = self.by_file.entry(file.clone()).or_default();
+        let entry = self.by_file.entry(file).or_default();
         for symbol in module.symbols() {
-            let record = SymbolRecord::of(&file, symbol);
+            let record = SymbolRecord::of(symbol, symbol.range(), module.analyzer());
             self.symbols.push(record);
             if let Some(position) = self.symbols.len().checked_sub(1) {
                 entry.push(position);
@@ -421,51 +293,45 @@ impl<'a> Builder<'a> {
     }
 
     /// File-contains-symbol and class/function-contains-member edges.
-    /// Ownership comes from adapter scope evidence; a missing parent is
-    /// unreachable from this adapter, so it is skipped rather than invented.
+    /// Ownership is structural adapter evidence, so every symbol's parent is
+    /// known directly: there is no lookup to miss and no gap to skip.
     fn add_containment(&mut self, module: &ParsedModule) -> Result<(), GraphValidationError> {
         let file = module.file();
-        let mut full_paths: BTreeMap<String, SymbolId> = BTreeMap::new();
         for symbol in module.symbols() {
-            let record = SymbolRecord::of(file, symbol);
-            full_paths.insert(record.full.clone(), record.id.clone());
-        }
-        for symbol in module.symbols() {
-            let record = SymbolRecord::of(file, symbol);
-            let from = if record.parent.is_empty() {
-                NodeId::Artifact(file.clone())
-            } else if let Some(parent) = full_paths.get(&record.parent) {
-                NodeId::Symbol(parent.clone())
-            } else {
-                continue;
+            let record = SymbolRecord::of(symbol, symbol.range(), module.analyzer());
+            let from = match record.id.owner() {
+                None => NodeId::Artifact(file.clone()),
+                Some(parent) => NodeId::Symbol(parent.clone()),
             };
             self.push_relation(
                 from,
                 NodeId::Symbol(record.id),
                 RelationKind::Contains,
                 Confidence::Deterministic,
-                Vec::new(),
                 vec![symbol.range()],
             )?;
         }
         Ok(())
     }
 
-    /// Records a relation, tracking external targets for the node
+    /// Records a resolved relation, tracking external targets for the node
     /// inventory. Evidence is never empty at any call site; a violation
-    /// propagates instead of publishing an unattributed edge. Self-edges
-    /// (`from . import x` resolving its own package) are skipped: a file
-    /// depending on itself carries no information.
+    /// propagates instead of publishing an unattributed edge. A file
+    /// importing itself (`from . import x` resolving its own package)
+    /// carries no information and is skipped — but only for imports:
+    /// recursive calls are legitimate edges.
+    ///
+    /// Resolved observations are deterministic by construction; inferred
+    /// edges will carry their own confidence when that stage exists.
     fn push_relation(
         &mut self,
         from: NodeId,
         to: NodeId,
         kind: RelationKind,
         confidence: Confidence,
-        candidates: Vec<NodeId>,
         evidence: Vec<SourceRange>,
     ) -> Result<(), GraphValidationError> {
-        if from == to {
+        if kind == RelationKind::Imports && from == to {
             return Ok(());
         }
         if let NodeId::External { module } = &to {
@@ -473,10 +339,9 @@ impl<'a> Builder<'a> {
         }
         self.relations.push(Relation::new(
             from,
-            to,
+            RelationTarget::Resolved(to),
             kind,
             confidence,
-            candidates,
             evidence,
             self.analyzer,
         )?);
@@ -568,22 +433,17 @@ impl<'a> Builder<'a> {
                     NodeId::Artifact(target.clone()),
                     RelationKind::Imports,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![import.range()],
                 )?;
                 self.bind_module_names(file, import, Resolution::Resolved { target });
             }
             Resolution::Ambiguous { candidates } => {
-                if let [first, ..] = candidates.as_slice() {
-                    self.push_relation(
-                        file_node,
-                        NodeId::Artifact(first.clone()),
-                        RelationKind::Imports,
-                        Confidence::Ambiguous,
-                        candidates.iter().cloned().map(NodeId::Artifact).collect(),
-                        vec![import.range()],
-                    )?;
-                }
+                self.push_ambiguous(
+                    file_node,
+                    candidates.iter().cloned().map(NodeId::Artifact).collect(),
+                    RelationKind::Imports,
+                    import.range(),
+                )?;
                 self.bind_module_names(file, import, Resolution::Ambiguous { candidates });
             }
             Resolution::External { module } => {
@@ -594,7 +454,6 @@ impl<'a> Builder<'a> {
                     },
                     RelationKind::Imports,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![import.range()],
                 )?;
                 self.bind_module_names(file, import, Resolution::External { module });
@@ -623,7 +482,7 @@ impl<'a> Builder<'a> {
         let entry = self.imports.entry(file.clone()).or_default();
         for name in import.names() {
             entry.bindings.insert(
-                name.as_str().to_owned(),
+                name.bound().as_str().to_owned(),
                 Binding::Module {
                     resolution: resolution.clone(),
                 },
@@ -645,68 +504,76 @@ impl<'a> Builder<'a> {
                     NodeId::Artifact(target.clone()),
                     RelationKind::Imports,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![import.range()],
                 )?;
                 for name in import.names() {
-                    let defined = self.top_level_symbols(&target, name.as_str());
+                    let bound = name.bound().as_str();
+                    let defined = self.top_level_symbols(&target, name.imported());
                     if let [only] = defined.as_slice() {
-                        self.bind_symbol(file, name.as_str(), only.clone());
+                        self.bind_symbol(file, bound, only.clone());
                     } else if !defined.is_empty() {
                         self.push_diagnostic(
                             DiagnosticKind::Import,
                             file,
                             import_subject(import),
                             format!(
-                                "name '{}' is defined {} times in '{}'",
-                                name.as_str(),
+                                "name {} is defined {} times in '{}'",
+                                name_render(name),
                                 defined.len(),
                                 target.as_path().display()
                             ),
                             import.range(),
                         );
-                        self.bind_broken(file, name.as_str());
-                    } else if let Some(submodule) =
-                        self.index.resolve_submodule(&target, name.as_str())
-                    {
-                        self.push_relation(
-                            NodeId::Artifact(file.clone()),
-                            NodeId::Artifact(submodule.clone()),
-                            RelationKind::Imports,
-                            Confidence::Deterministic,
-                            Vec::new(),
-                            vec![import.range()],
-                        )?;
-                        self.bind_submodule(file, name.as_str(), submodule);
+                        self.bind_broken(file, bound);
                     } else {
-                        self.push_diagnostic(
-                            DiagnosticKind::Import,
-                            file,
-                            import_subject(import),
-                            format!(
-                                "name '{}' is neither defined in '{}' nor a submodule of it",
-                                name.as_str(),
-                                target.as_path().display()
-                            ),
-                            import.range(),
-                        );
-                        self.bind_broken(file, name.as_str());
+                        match self.index.resolve_submodule(&target, name.imported()) {
+                            Ok(Some(submodule)) => {
+                                self.push_relation(
+                                    NodeId::Artifact(file.clone()),
+                                    NodeId::Artifact(submodule.clone()),
+                                    RelationKind::Imports,
+                                    Confidence::Deterministic,
+                                    vec![import.range()],
+                                )?;
+                                self.bind_submodule(file, bound, submodule);
+                            }
+                            Ok(None) => {
+                                self.push_diagnostic(
+                                    DiagnosticKind::Import,
+                                    file,
+                                    import_subject(import),
+                                    format!(
+                                        "name {} is neither defined in '{}' nor a submodule of it",
+                                        name_render(name),
+                                        target.as_path().display()
+                                    ),
+                                    import.range(),
+                                );
+                                self.bind_broken(file, bound);
+                            }
+                            Err(_) => {
+                                self.push_diagnostic(
+                                    DiagnosticKind::Import,
+                                    file,
+                                    import_subject(import),
+                                    "package path is not valid UTF-8".to_owned(),
+                                    import.range(),
+                                );
+                                self.bind_broken(file, bound);
+                            }
+                        }
                     }
                 }
             }
             Resolution::Ambiguous { candidates } => {
-                if let [first, ..] = candidates.as_slice() {
-                    self.push_relation(
-                        file_node,
-                        NodeId::Artifact(first.clone()),
-                        RelationKind::Imports,
-                        Confidence::Ambiguous,
-                        candidates.iter().cloned().map(NodeId::Artifact).collect(),
-                        vec![import.range()],
-                    )?;
-                }
+                self.push_ambiguous(
+                    file_node,
+                    candidates.iter().cloned().map(NodeId::Artifact).collect(),
+                    RelationKind::Imports,
+                    import.range(),
+                )?;
                 for name in import.names() {
-                    self.bind_broken(file, name.as_str());
+                    self.bind_broken(file, name.bound().as_str());
                 }
             }
             Resolution::External { module } => {
@@ -717,13 +584,12 @@ impl<'a> Builder<'a> {
                     },
                     RelationKind::Imports,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![import.range()],
                 )?;
                 let entry = self.imports.entry(file.clone()).or_default();
                 for name in import.names() {
                     entry.bindings.insert(
-                        name.as_str().to_owned(),
+                        name.bound().as_str().to_owned(),
                         Binding::ExternalName {
                             module: module.clone(),
                         },
@@ -739,7 +605,7 @@ impl<'a> Builder<'a> {
                     import.range(),
                 );
                 for name in import.names() {
-                    self.bind_broken(file, name.as_str());
+                    self.bind_broken(file, name.bound().as_str());
                 }
             }
         }
@@ -811,7 +677,6 @@ impl<'a> Builder<'a> {
                     NodeId::Symbol(only.clone()),
                     RelationKind::Inherits,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![inheritance.range()],
                 )?;
             }
@@ -878,7 +743,6 @@ impl<'a> Builder<'a> {
                         NodeId::External { module },
                         RelationKind::Inherits,
                         Confidence::Deterministic,
-                        Vec::new(),
                         vec![inheritance.range()],
                     )?;
                 }
@@ -914,17 +778,11 @@ impl<'a> Builder<'a> {
                 // classes nested directly inside it. Deeper paths use only
                 // their final segment; the diagnostic subject keeps the full
                 // text visible.
-                let parent = if target.owner().is_some() {
-                    format!(
-                        "{}.{}",
-                        target
-                            .owner()
-                            .map(|owner| owner.as_str())
-                            .unwrap_or_default(),
-                        target.name().as_str()
-                    )
-                } else {
+                let parent = target.scope_path();
+                let parent = if parent.is_empty() {
                     target.name().as_str().to_owned()
+                } else {
+                    format!("{}.{}", parent, target.name().as_str())
                 };
                 let found: Vec<SymbolId> = self
                     .symbols_in_scope(target.file(), &parent, tail)
@@ -948,7 +806,6 @@ impl<'a> Builder<'a> {
                     NodeId::External { module },
                     RelationKind::Inherits,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![inheritance.range()],
                 )?;
             }
@@ -1005,7 +862,6 @@ impl<'a> Builder<'a> {
                     NodeId::Symbol(only.clone()),
                     RelationKind::Inherits,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![range],
                 )?;
             }
@@ -1030,28 +886,30 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Emits an ambiguous edge addressed at its lexicographically first
-    /// candidate with the full set attached. Candidates are files or symbols
-    /// already in the node inventory, so validation still holds.
+    /// Emits an ambiguous edge: the candidate set with no primary target.
+    /// Candidates are files or symbols already in the node inventory, so
+    /// validation still holds. Ambiguity this precisely observed is a
+    /// deterministic fact about the analysis, hence the confidence.
     fn push_ambiguous(
         &mut self,
         from: NodeId,
-        mut candidates: Vec<NodeId>,
+        candidates: Vec<NodeId>,
         kind: RelationKind,
         range: SourceRange,
     ) -> Result<(), GraphValidationError> {
-        candidates.sort();
-        candidates.dedup();
-        if let Some(first) = candidates.first().cloned() {
-            self.push_relation(
-                from,
-                first,
-                kind,
-                Confidence::Ambiguous,
-                candidates,
-                vec![range],
-            )?;
+        for endpoint in &candidates {
+            if let NodeId::External { module } = endpoint {
+                self.externals.insert(module.clone());
+            }
         }
+        self.relations.push(Relation::new(
+            from,
+            RelationTarget::Ambiguous(candidates),
+            kind,
+            Confidence::Deterministic,
+            vec![range],
+            self.analyzer,
+        )?);
         Ok(())
     }
 
@@ -1081,8 +939,9 @@ impl<'a> Builder<'a> {
     /// own owner path, then each enclosing path, then module top level.
     fn definition_scopes(&self, defined: &SymbolId) -> Vec<String> {
         let mut scopes = Vec::new();
-        if let Some(owner) = defined.owner() {
-            let mut path = owner.as_str().to_owned();
+        let scope = defined.scope_path();
+        if !scope.is_empty() {
+            let mut path = scope;
             scopes.push(path.clone());
             while let Some((parent, _)) = path.rsplit_once('.') {
                 scopes.push(parent.to_owned());
@@ -1151,7 +1010,6 @@ impl<'a> Builder<'a> {
                     NodeId::Symbol(found.remove(0)),
                     RelationKind::Calls,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![call.range()],
                 )?;
                 return Ok(());
@@ -1176,7 +1034,6 @@ impl<'a> Builder<'a> {
                     NodeId::Symbol(target),
                     RelationKind::Calls,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![call.range()],
                 )?;
             }
@@ -1195,7 +1052,6 @@ impl<'a> Builder<'a> {
                     NodeId::External { module },
                     RelationKind::Calls,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![call.range()],
                 )?;
             }
@@ -1255,7 +1111,6 @@ impl<'a> Builder<'a> {
                             NodeId::Symbol(only.clone()),
                             RelationKind::Calls,
                             Confidence::Deterministic,
-                            Vec::new(),
                             vec![call.range()],
                         )?;
                     }
@@ -1327,7 +1182,6 @@ impl<'a> Builder<'a> {
                         NodeId::External { module },
                         RelationKind::Calls,
                         Confidence::Deterministic,
-                        Vec::new(),
                         vec![call.range()],
                     )?;
                 }
@@ -1344,17 +1198,11 @@ impl<'a> Builder<'a> {
                     );
                     return Ok(());
                 }
-                let parent = if target.owner().is_some() {
-                    format!(
-                        "{}.{}",
-                        target
-                            .owner()
-                            .map(|owner| owner.as_str())
-                            .unwrap_or_default(),
-                        target.name().as_str()
-                    )
-                } else {
+                let parent = target.scope_path();
+                let parent = if parent.is_empty() {
                     target.name().as_str().to_owned()
+                } else {
+                    format!("{}.{}", parent, target.name().as_str())
                 };
                 let found: Vec<SymbolId> = self
                     .symbols_in_scope(target.file(), &parent, name)
@@ -1368,7 +1216,6 @@ impl<'a> Builder<'a> {
                             NodeId::Symbol(only.clone()),
                             RelationKind::Calls,
                             Confidence::Deterministic,
-                            Vec::new(),
                             vec![call.range()],
                         )?;
                     }
@@ -1400,7 +1247,6 @@ impl<'a> Builder<'a> {
                     NodeId::External { module },
                     RelationKind::Calls,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![call.range()],
                 )?;
             }
@@ -1440,7 +1286,6 @@ impl<'a> Builder<'a> {
                     NodeId::Symbol(only.clone()),
                     RelationKind::Calls,
                     Confidence::Deterministic,
-                    Vec::new(),
                     vec![call.range()],
                 )?;
             }
@@ -1469,21 +1314,26 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(mut self) -> Result<ResolvedGraph, GraphValidationError> {
-        let mut nodes: BTreeSet<NodeId> = self
-            .index
-            .files()
-            .iter()
-            .cloned()
-            .map(NodeId::Artifact)
-            .collect();
+        let mut nodes: BTreeMap<NodeId, NodeInfo> = BTreeMap::new();
+        for file in self.index.files() {
+            nodes.insert(
+                NodeId::Artifact(file.clone()),
+                NodeInfo::new(None, self.analyzer),
+            );
+        }
         for record in &self.symbols {
-            nodes.insert(NodeId::Symbol(record.id.clone()));
+            nodes.insert(
+                NodeId::Symbol(record.id.clone()),
+                NodeInfo::new(Some(record.range), record.analyzer),
+            );
         }
         for module in self.externals {
-            nodes.insert(NodeId::External { module });
+            nodes.insert(
+                NodeId::External { module },
+                NodeInfo::new(None, self.analyzer),
+            );
         }
-        let graph = Graph::new(nodes, std::mem::take(&mut self.relations));
-        graph.validate()?;
+        let graph = Graph::try_new(self.metadata, nodes, std::mem::take(&mut self.relations))?;
         self.diagnostics.sort_by(|a, b| {
             (
                 a.file().clone(),
@@ -1502,492 +1352,5 @@ impl<'a> Builder<'a> {
             graph,
             diagnostics: self.diagnostics,
         })
-    }
-}
-
-#[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "fixture I/O and adapter setup failure must fail the test immediately"
-)]
-mod tests {
-    use super::*;
-    use crate::python::PythonAdapter;
-    use rootline_core::ir::ParsedModule;
-    use std::path::{Path, PathBuf};
-
-    const GRAPH_ROOT: &str = "fixtures/python/graph";
-
-    fn fixture_file(name: &str) -> RepoPath {
-        RepoPath::new(&Path::new(GRAPH_ROOT).join(name)).expect("fixture path is relative")
-    }
-
-    fn parse_report(path: &RepoPath, root: &Path) -> ParsedModule {
-        let absolute = root.join(path.as_path());
-        let source = std::fs::read_to_string(&absolute)
-            .unwrap_or_else(|_| panic!("read fixture {}", absolute.display()));
-        PythonAdapter::new()
-            .expect("adapter builds")
-            .parse(path, &source)
-            .expect("fixture parses without adapter failure")
-    }
-
-    fn fixture_graph() -> ResolvedGraph {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let names = [
-            "__init__.py",
-            "helper.py",
-            "main.py",
-            "shop/__init__.py",
-            "shop/cart.py",
-            "shop/store/__init__.py",
-            "shop/store/shelf.py",
-        ];
-        let modules: Vec<ParsedModule> = names
-            .iter()
-            .map(|name| parse_report(&fixture_file(name), &root))
-            .collect();
-        let files: Vec<RepoPath> = names.iter().map(|name| fixture_file(name)).collect();
-        let index = ModuleIndex::new(
-            vec![RepoPath::new(Path::new(GRAPH_ROOT)).expect("root")],
-            files,
-        );
-        build(&modules, &index).expect("fixture graph validates")
-    }
-
-    fn edge_summary(relation: &Relation) -> (String, String, String, String) {
-        (
-            relation.from().to_string(),
-            relation.kind().to_string(),
-            relation.to().to_string(),
-            relation.confidence().to_string(),
-        )
-    }
-
-    #[test]
-    fn builds_containment_for_files_and_owners() {
-        let resolved = fixture_graph();
-        let edges: Vec<_> = resolved
-            .graph()
-            .relations()
-            .iter()
-            .filter(|relation| relation.kind() == RelationKind::Contains)
-            .map(edge_summary)
-            .collect();
-        let root = GRAPH_ROOT;
-        assert_eq!(
-            edges,
-            [
-                (
-                    format!("file:{root}/helper.py"),
-                    "contains".to_owned(),
-                    "function:assist".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/main.py"),
-                    "contains".to_owned(),
-                    "function:run".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/cart.py"),
-                    "contains".to_owned(),
-                    "class:Cart".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "contains".to_owned(),
-                    "function:locate".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "contains".to_owned(),
-                    "class:Base".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "contains".to_owned(),
-                    "class:Broken".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "contains".to_owned(),
-                    "class:Posix".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "contains".to_owned(),
-                    "class:Shelf".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Cart".to_owned(),
-                    "contains".to_owned(),
-                    "method:Cart.__init__".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Cart".to_owned(),
-                    "contains".to_owned(),
-                    "method:Cart.add".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Cart".to_owned(),
-                    "contains".to_owned(),
-                    "method:Cart.checkout".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Cart".to_owned(),
-                    "contains".to_owned(),
-                    "method:Cart.total".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Base".to_owned(),
-                    "contains".to_owned(),
-                    "method:Base.move".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Shelf".to_owned(),
-                    "contains".to_owned(),
-                    "method:Shelf.place".to_owned(),
-                    "deterministic".to_owned()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn resolves_import_edges_and_externals() {
-        let resolved = fixture_graph();
-        let edges: Vec<_> = resolved
-            .graph()
-            .relations()
-            .iter()
-            .filter(|relation| relation.kind() == RelationKind::Imports)
-            .map(edge_summary)
-            .collect();
-        let root = GRAPH_ROOT;
-        assert_eq!(
-            edges,
-            [
-                (
-                    format!("file:{root}/main.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/cart.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/main.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/main.py"),
-                    "imports".to_owned(),
-                    "external:pathlib".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/__init__.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/cart.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/__init__.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/store/__init__.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/__init__.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/cart.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/__init__.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/cart.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/helper.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/cart.py"),
-                    "imports".to_owned(),
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/cart.py"),
-                    "imports".to_owned(),
-                    "external:os".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    format!("file:{root}/shop/store/shelf.py"),
-                    "imports".to_owned(),
-                    "external:os".to_owned(),
-                    "deterministic".to_owned()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn resolves_calls_conservatively() {
-        let resolved = fixture_graph();
-        let edges: Vec<_> = resolved
-            .graph()
-            .relations()
-            .iter()
-            .filter(|relation| relation.kind() == RelationKind::Calls)
-            .map(edge_summary)
-            .collect();
-        assert_eq!(
-            edges,
-            [
-                (
-                    "function:run".to_owned(),
-                    "calls".to_owned(),
-                    "class:Cart".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "function:run".to_owned(),
-                    "calls".to_owned(),
-                    "class:Shelf".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "function:run".to_owned(),
-                    "calls".to_owned(),
-                    "external:pathlib".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "method:Cart.add".to_owned(),
-                    "calls".to_owned(),
-                    "function:locate".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "method:Cart.checkout".to_owned(),
-                    "calls".to_owned(),
-                    "function:assist".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "method:Cart.checkout".to_owned(),
-                    "calls".to_owned(),
-                    "method:Cart.total".to_owned(),
-                    "deterministic".to_owned()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn resolves_inheritance_with_evidence() {
-        let resolved = fixture_graph();
-        let edges: Vec<_> = resolved
-            .graph()
-            .relations()
-            .iter()
-            .filter(|relation| relation.kind() == RelationKind::Inherits)
-            .map(edge_summary)
-            .collect();
-        assert_eq!(
-            edges,
-            [
-                (
-                    "class:Broken".to_owned(),
-                    "inherits".to_owned(),
-                    "class:Shelf".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Posix".to_owned(),
-                    "inherits".to_owned(),
-                    "external:os".to_owned(),
-                    "deterministic".to_owned()
-                ),
-                (
-                    "class:Shelf".to_owned(),
-                    "inherits".to_owned(),
-                    "class:Base".to_owned(),
-                    "deterministic".to_owned()
-                ),
-            ]
-        );
-        for relation in resolved
-            .graph()
-            .relations()
-            .iter()
-            .filter(|relation| relation.kind() == RelationKind::Inherits)
-        {
-            assert!(!relation.evidence().is_empty());
-        }
-    }
-
-    #[test]
-    fn unproven_facts_stay_visible_diagnostics() {
-        let resolved = fixture_graph();
-        let diagnostics: Vec<_> = resolved
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| {
-                (
-                    diagnostic.kind().to_string(),
-                    diagnostic.file().as_path().display().to_string(),
-                    diagnostic.subject().to_owned(),
-                    diagnostic.reason().to_owned(),
-                )
-            })
-            .collect();
-        let root = GRAPH_ROOT;
-        assert_eq!(
-            diagnostics,
-            [
-                (
-                    "import".to_owned(),
-                    format!("{root}/main.py"),
-                    "from .ghost import missing".to_owned(),
-                    "no analyzed file provides the relative target".to_owned()
-                ),
-                (
-                    "call".to_owned(),
-                    format!("{root}/main.py"),
-                    "unknown_thing()".to_owned(),
-                    "'unknown_thing' has no in-scope definition or import binding".to_owned()
-                ),
-                (
-                    "import".to_owned(),
-                    format!("{root}/shop/cart.py"),
-                    "from .store.shelf import move, locate".to_owned(),
-                    format!(
-                        "name 'move' is neither defined in '{root}/shop/store/shelf.py' nor a submodule of it"
-                    )
-                ),
-                (
-                    "call".to_owned(),
-                    format!("{root}/shop/cart.py"),
-                    "?.append()".to_owned(),
-                    "complex receiver expression; call target unproven".to_owned()
-                ),
-                (
-                    "call".to_owned(),
-                    format!("{root}/shop/store/shelf.py"),
-                    "?.join()".to_owned(),
-                    "complex receiver expression; call target unproven".to_owned()
-                ),
-                (
-                    "call".to_owned(),
-                    format!("{root}/shop/store/shelf.py"),
-                    "self.move()".to_owned(),
-                    "'move' is not a method of 'Shelf'".to_owned()
-                ),
-                (
-                    "base-class".to_owned(),
-                    format!("{root}/shop/store/shelf.py"),
-                    "Missing".to_owned(),
-                    "base class 'Missing' resolves to no analyzed class".to_owned()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn published_graph_has_no_dangling_endpoints() {
-        let resolved = fixture_graph();
-        assert!(resolved.graph().validate().is_ok());
-        // 7 artifacts + 14 symbols + 2 externals (os, pathlib).
-        assert_eq!(resolved.graph().nodes().len(), 23);
-        assert_eq!(resolved.graph().relations().len(), 34);
-    }
-
-    #[test]
-    fn ambiguous_modules_produce_candidates_not_guesses() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let main_path = RepoPath::new(Path::new("entry.py")).expect("test path");
-        let source = "import dup.mod\n";
-        let main = PythonAdapter::new()
-            .expect("adapter builds")
-            .parse(&main_path, source)
-            .expect("inline source parses");
-        let index = ModuleIndex::new(
-            vec![
-                RepoPath::new(Path::new("libs/a")).expect("root"),
-                RepoPath::new(Path::new("libs/b")).expect("root"),
-            ],
-            vec![
-                main_path.clone(),
-                RepoPath::new(Path::new("libs/a/dup/mod.py")).expect("test path"),
-                RepoPath::new(Path::new("libs/b/dup/mod.py")).expect("test path"),
-            ],
-        );
-        let _ = root;
-        let resolved = build(std::slice::from_ref(&main), &index).expect("graph validates");
-        let edges: Vec<_> = resolved
-            .graph()
-            .relations()
-            .iter()
-            .map(edge_summary)
-            .collect();
-        assert_eq!(
-            edges,
-            [(
-                "file:entry.py".to_owned(),
-                "imports".to_owned(),
-                "file:libs/a/dup/mod.py".to_owned(),
-                "ambiguous".to_owned()
-            )]
-        );
-        let relation = &resolved.graph().relations()[0];
-        assert_eq!(relation.candidates().len(), 2);
-    }
-
-    #[test]
-    fn build_is_independent_of_input_order() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let names = [
-            "main.py",
-            "shop/cart.py",
-            "helper.py",
-            "shop/__init__.py",
-            "shop/store/shelf.py",
-            "shop/store/__init__.py",
-            "__init__.py",
-        ];
-        let modules: Vec<ParsedModule> = names
-            .iter()
-            .map(|name| parse_report(&fixture_file(name), &root))
-            .collect();
-        let files: Vec<RepoPath> = names.iter().map(|name| fixture_file(name)).collect();
-        let index = ModuleIndex::new(
-            vec![RepoPath::new(Path::new(GRAPH_ROOT)).expect("root")],
-            files,
-        );
-        let _ = PathBuf::new();
-        assert_eq!(
-            build(&modules, &index).expect("graph validates"),
-            fixture_graph()
-        );
     }
 }

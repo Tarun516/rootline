@@ -1,37 +1,44 @@
 //! Provenance-aware fact-graph types.
 //!
 //! These types describe the published graph: addressable nodes, typed
-//! relations with confidence and evidence, and the validation that keeps
-//! dangling references out of published output. Like the IR, this module is
+//! relations with assertion strength and evidence, and the validation that
+//! keeps dangling references out of published output. Like the IR, this module is
 //! dependency-free; storage, transport, and inference layers build on it
 //! without leaking their types back in.
+//!
+//! Three concepts stay separate by construction:
+//!
+//! - assertion strength ([`Confidence`]): how strongly the assertion itself
+//!   is believed — deterministic observation versus ranked inference;
+//! - resolution outcome ([`RelationTarget`]): whether the target is proven
+//!   ([`RelationTarget::Resolved`]) or an explicit candidate set
+//!   ([`RelationTarget::Ambiguous`]) with no fake primary;
+//! - operational result: `Ok` versus `Err`, never a relation state. Unknown
+//!   and failed analyses surface as diagnostics or typed errors, not edges.
 //!
 //! Endpoint direction per relation kind:
 //!
 //! - `Contains`: artifact to symbol, or symbol to symbol (class to method);
 //! - `Imports`: artifact to artifact, or artifact to an external module;
-//! - `Calls`: symbol (or artifact for module-level code) to a symbol, with
-//!   `candidates` populated when the target is ambiguous;
+//! - `Calls`: symbol (or artifact for module-level code) to a symbol target;
 //! - `Inherits`: class symbol to a class symbol or external base.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::RepoPath;
+use crate::RepoPathError;
 use crate::ir::{AnalyzerInfo, SourceRange, SymbolId};
 
-/// Confidence of a material assertion. These states must not be collapsed
-/// into one unexplained score: `ambiguous` (multiple candidates) and
-/// `unknown` (insufficient evidence) demand different user responses.
+/// Strength of a material assertion: deterministic observation versus
+/// ranked inference. Resolution state lives in [`RelationTarget`], and
+/// operational failure lives in `Err` — neither is a confidence level, so
+/// neither appears here.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Confidence {
     Deterministic,
     Probable,
     Possible,
-    Ambiguous,
-    Unknown,
-    Unsupported,
-    Failed,
 }
 
 impl fmt::Display for Confidence {
@@ -40,10 +47,6 @@ impl fmt::Display for Confidence {
             Self::Deterministic => f.write_str("deterministic"),
             Self::Probable => f.write_str("probable"),
             Self::Possible => f.write_str("possible"),
-            Self::Ambiguous => f.write_str("ambiguous"),
-            Self::Unknown => f.write_str("unknown"),
-            Self::Unsupported => f.write_str("unsupported"),
-            Self::Failed => f.write_str("failed"),
         }
     }
 }
@@ -62,11 +65,24 @@ impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Artifact(path) => write!(f, "file:{}", path.as_path().display()),
-            Self::Symbol(id) => match id.owner() {
-                Some(owner) => write!(f, "{}:{}.{}", id.kind(), owner, id.name()),
-                None => write!(f, "{}:{}", id.kind(), id.name()),
-            },
+            Self::Symbol(id) => write!(f, "{}:{}", id.kind(), id.full_path()),
             Self::External { module } => write!(f, "external:{module}"),
+        }
+    }
+}
+
+impl NodeId {
+    /// Canonical string for persisted, protocol, and test-comparison use.
+    /// Artifact paths render with `/` separators on every platform; symbol
+    /// and external forms are already platform-independent.
+    ///
+    /// # Errors
+    /// Propagates [`RepoPathError`] when an artifact path is not valid UTF-8.
+    pub fn to_canonical_string(&self) -> Result<String, RepoPathError> {
+        match self {
+            Self::Artifact(path) => Ok(format!("file:{}", path.to_canonical_string()?)),
+            Self::Symbol(_) => Ok(self.to_string()),
+            Self::External { module } => Ok(format!("external:{module}")),
         }
     }
 }
@@ -96,6 +112,7 @@ impl fmt::Display for RelationKind {
 pub enum GraphValidationError {
     EmptyEvidence { kind: RelationKind },
     DanglingEndpoint { endpoint: String },
+    AmbiguousTarget { candidates: usize },
 }
 
 impl fmt::Display for GraphValidationError {
@@ -107,51 +124,92 @@ impl fmt::Display for GraphValidationError {
             Self::DanglingEndpoint { endpoint } => {
                 write!(f, "relation references missing endpoint {endpoint}")
             }
+            Self::AmbiguousTarget { candidates } => {
+                write!(
+                    f,
+                    "ambiguous target needs at least 2 candidates, got {candidates}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for GraphValidationError {}
 
+/// What a relation points at: exactly one proven target, or an explicit
+/// candidate set with no primary. There is deliberately no `to()` accessor
+/// returning a single node: consumers must match on the target, which makes
+/// accidentally treating ambiguity as resolution unrepresentable.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RelationTarget {
+    Resolved(NodeId),
+    Ambiguous(Vec<NodeId>),
+}
+
+impl RelationTarget {
+    /// All endpoints this target touches: one for resolved, every candidate
+    /// for ambiguous. Used by publication validation.
+    pub fn endpoints(&self) -> Vec<&NodeId> {
+        match self {
+            Self::Resolved(node) => vec![node],
+            Self::Ambiguous(candidates) => candidates.iter().collect(),
+        }
+    }
+}
+
 /// One attributable connection. Every relation carries at least one source
 /// range proving where the connection was observed, plus the analyzer that
-/// produced it. Ambiguous relations name their candidate targets explicitly
-/// instead of promoting one guess to a deterministic edge.
+/// produced it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Relation {
     from: NodeId,
-    to: NodeId,
+    target: RelationTarget,
     kind: RelationKind,
     confidence: Confidence,
-    candidates: Vec<NodeId>,
     evidence: Vec<SourceRange>,
     analyzer: AnalyzerInfo,
 }
 
 impl Relation {
-    /// Builds a relation, rejecting evidence-free assertions: a connection
-    /// without an observed source location must not enter the graph.
+    /// Builds a relation, rejecting evidence-free assertions and degenerate
+    /// ambiguity: a connection without an observed source location, or an
+    /// "ambiguous" target with fewer than two candidates, must not enter
+    /// the graph.
     ///
     /// # Errors
-    /// Returns [`GraphValidationError::EmptyEvidence`] when `evidence` is empty.
+    /// Returns [`GraphValidationError::EmptyEvidence`] when `evidence` is
+    /// empty, or [`GraphValidationError::AmbiguousTarget`] for an ambiguous
+    /// target with fewer than two distinct candidates.
     pub fn new(
         from: NodeId,
-        to: NodeId,
+        target: RelationTarget,
         kind: RelationKind,
         confidence: Confidence,
-        candidates: Vec<NodeId>,
         evidence: Vec<SourceRange>,
         analyzer: AnalyzerInfo,
     ) -> Result<Self, GraphValidationError> {
         if evidence.is_empty() {
             return Err(GraphValidationError::EmptyEvidence { kind });
         }
+        let target = match target {
+            RelationTarget::Ambiguous(candidates) => {
+                let mut distinct: Vec<NodeId> = candidates;
+                distinct.sort();
+                distinct.dedup();
+                if distinct.len() < 2 {
+                    return Err(GraphValidationError::AmbiguousTarget {
+                        candidates: distinct.len(),
+                    });
+                }
+                RelationTarget::Ambiguous(distinct)
+            }
+            resolved => resolved,
+        };
         Ok(Self {
             from,
-            to,
+            target,
             kind,
             confidence,
-            candidates,
             evidence,
             analyzer,
         })
@@ -161,8 +219,8 @@ impl Relation {
         &self.from
     }
 
-    pub fn to(&self) -> &NodeId {
-        &self.to
+    pub fn target(&self) -> &RelationTarget {
+        &self.target
     }
 
     pub fn kind(&self) -> RelationKind {
@@ -171,10 +229,6 @@ impl Relation {
 
     pub fn confidence(&self) -> Confidence {
         self.confidence
-    }
-
-    pub fn candidates(&self) -> &[NodeId] {
-        &self.candidates
     }
 
     pub fn evidence(&self) -> &[SourceRange] {
@@ -186,49 +240,123 @@ impl Relation {
     }
 }
 
-/// A published fact-graph snapshot: its node inventory plus relations in
-/// deterministic order.
+/// Provenance of one node: what declared it, and which analyzer observed
+/// it. Symbols carry their declaration range and the parsing adapter;
+/// artifacts and externals carry no range, and artifacts will migrate to
+/// scanner provenance once the repository layer owns node assembly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeInfo {
+    range: Option<SourceRange>,
+    analyzer: AnalyzerInfo,
+}
+
+impl NodeInfo {
+    pub fn new(range: Option<SourceRange>, analyzer: AnalyzerInfo) -> Self {
+        Self { range, analyzer }
+    }
+
+    pub fn range(self) -> Option<SourceRange> {
+        self.range
+    }
+
+    pub fn analyzer(self) -> AnalyzerInfo {
+        self.analyzer
+    }
+}
+
+/// Graph-level provenance: which repository snapshot this graph describes.
+/// Both fields are opaque strings on purpose — real repository and revision
+/// identity types arrive with the persistence design, and inventing them
+/// here would fossilize guesses into stored data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphMetadata {
+    repository: Option<String>,
+    revision: Option<String>,
+}
+
+impl GraphMetadata {
+    pub fn new(repository: Option<String>, revision: Option<String>) -> Self {
+        Self {
+            repository,
+            revision,
+        }
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
+}
+
+/// A published fact-graph snapshot: its provenance, node inventory with per-
+/// node records, and relations in deterministic order. The only constructor
+/// validates, so holding a `Graph` means holding a graph with no dangling
+/// endpoints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Graph {
-    nodes: BTreeSet<NodeId>,
+    metadata: GraphMetadata,
+    nodes: BTreeMap<NodeId, NodeInfo>,
     relations: Vec<Relation>,
 }
 
 impl Graph {
     /// Builds a snapshot, canonicalizing relation order so repeated builds
-    /// and snapshot tests observe deterministic output.
-    pub fn new(nodes: BTreeSet<NodeId>, mut relations: Vec<Relation>) -> Self {
+    /// and snapshot tests observe deterministic output, and validating every
+    /// endpoint against the node inventory.
+    ///
+    /// # Errors
+    /// Returns [`GraphValidationError::DanglingEndpoint`] for the first
+    /// endpoint missing from `nodes`.
+    pub fn try_new(
+        metadata: GraphMetadata,
+        nodes: BTreeMap<NodeId, NodeInfo>,
+        mut relations: Vec<Relation>,
+    ) -> Result<Self, GraphValidationError> {
         relations.sort_by(|a, b| {
-            (a.from(), a.kind() as u8, a.to(), a.confidence() as u8).cmp(&(
+            (a.from(), a.kind() as u8, a.target(), a.confidence() as u8).cmp(&(
                 b.from(),
                 b.kind() as u8,
-                b.to(),
+                b.target(),
                 b.confidence() as u8,
             ))
         });
-        Self { nodes, relations }
+        let graph = Self {
+            metadata,
+            nodes,
+            relations,
+        };
+        graph.validate()?;
+        Ok(graph)
     }
 
-    pub fn nodes(&self) -> &BTreeSet<NodeId> {
+    pub fn metadata(&self) -> &GraphMetadata {
+        &self.metadata
+    }
+
+    pub fn nodes(&self) -> &BTreeMap<NodeId, NodeInfo> {
         &self.nodes
+    }
+
+    pub fn node_info(&self, id: &NodeId) -> Option<&NodeInfo> {
+        self.nodes.get(id)
     }
 
     pub fn relations(&self) -> &[Relation] {
         &self.relations
     }
 
-    /// Verifies publication invariants: every endpoint (including ambiguous
-    /// candidates) resolves to the node inventory.
+    /// Verifies publication invariants: `from` plus every target endpoint
+    /// resolves to the node inventory.
     ///
     /// # Errors
     /// Returns the first dangling endpoint found.
     pub fn validate(&self) -> Result<(), GraphValidationError> {
         for relation in &self.relations {
-            for endpoint in std::iter::once(relation.to())
-                .chain(std::iter::once(relation.from()))
-                .chain(relation.candidates().iter())
-            {
-                if !self.nodes.contains(endpoint) {
+            for endpoint in std::iter::once(relation.from()).chain(relation.target().endpoints()) {
+                if !self.nodes.contains_key(endpoint) {
                     return Err(GraphValidationError::DanglingEndpoint {
                         endpoint: endpoint.to_string(),
                     });
@@ -269,12 +397,22 @@ mod tests {
     }
 
     fn test_symbol(path: &str, kind: SymbolKind, owner: Option<&str>, name: &str) -> Symbol {
+        let owner_id = owner.map(|owner| {
+            SymbolId::new(
+                test_path(path),
+                SymbolKind::Class,
+                None,
+                SymbolName::new(owner).expect("test owner is named"),
+                0,
+            )
+        });
         Symbol::new(
             SymbolId::new(
                 test_path(path),
                 kind,
-                owner.map(|owner| SymbolName::new(owner).expect("test owner is named")),
+                owner_id,
                 SymbolName::new(name).expect("test symbol is named"),
+                0,
             ),
             test_range(),
         )
@@ -285,6 +423,36 @@ mod tests {
         AnalyzerInfo::new("test", "0.0.0")
     }
 
+    fn test_metadata() -> GraphMetadata {
+        GraphMetadata::new(None, None)
+    }
+
+    fn test_nodes(ids: Vec<NodeId>) -> BTreeMap<NodeId, NodeInfo> {
+        ids.into_iter()
+            .map(|id| (id, NodeInfo::new(None, test_analyzer())))
+            .collect()
+    }
+
+    #[test]
+    fn nodes_carry_ranges_and_analyzers() {
+        let symbol = test_symbol("m.py", SymbolKind::Method, Some("Model"), "fit");
+        let id = NodeId::Symbol(symbol.id().clone());
+        let info = NodeInfo::new(Some(test_range()), test_analyzer());
+        assert_eq!(info.range(), Some(test_range()));
+        assert_eq!(info.analyzer(), test_analyzer());
+        let graph = Graph::try_new(
+            test_metadata(),
+            test_nodes(vec![NodeId::Artifact(test_path("m.py")), id.clone()]),
+            Vec::new(),
+        )
+        .expect("test graph validates");
+        assert_eq!(
+            graph.node_info(&id).expect("node present").analyzer(),
+            test_analyzer()
+        );
+        assert_eq!(graph.metadata().revision(), None);
+    }
+
     #[test]
     fn relations_require_source_evidence() {
         let from = NodeId::Artifact(test_path("a.py"));
@@ -292,10 +460,9 @@ mod tests {
         assert_eq!(
             Relation::new(
                 from,
-                to,
+                RelationTarget::Resolved(to),
                 RelationKind::Imports,
                 Confidence::Deterministic,
-                Vec::new(),
                 Vec::new(),
                 test_analyzer(),
             ),
@@ -306,22 +473,48 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_targets_need_two_distinct_candidates() {
+        let from = NodeId::Artifact(test_path("a.py"));
+        let only = NodeId::Artifact(test_path("b.py"));
+        assert_eq!(
+            Relation::new(
+                from.clone(),
+                RelationTarget::Ambiguous(vec![only.clone(), only.clone()]),
+                RelationKind::Imports,
+                Confidence::Deterministic,
+                vec![test_range()],
+                test_analyzer(),
+            ),
+            Err(GraphValidationError::AmbiguousTarget { candidates: 1 })
+        );
+        assert!(matches!(
+            Relation::new(
+                from,
+                RelationTarget::Ambiguous(vec![only]),
+                RelationKind::Imports,
+                Confidence::Deterministic,
+                vec![test_range()],
+                test_analyzer(),
+            ),
+            Err(GraphValidationError::AmbiguousTarget { .. })
+        ));
+    }
+
+    #[test]
     fn published_graph_rejects_dangling_endpoints() {
         let present = NodeId::Artifact(test_path("a.py"));
         let missing = NodeId::Artifact(test_path("ghost.py"));
         let relation = Relation::new(
             present.clone(),
-            missing,
+            RelationTarget::Resolved(missing),
             RelationKind::Imports,
             Confidence::Deterministic,
-            Vec::new(),
             vec![test_range()],
             test_analyzer(),
         )
         .expect("test relation is evidenced");
-        let graph = Graph::new(BTreeSet::from([present]), vec![relation]);
         assert!(matches!(
-            graph.validate(),
+            Graph::try_new(test_metadata(), test_nodes(vec![present]), vec![relation]),
             Err(GraphValidationError::DanglingEndpoint { .. })
         ));
     }
@@ -333,17 +526,19 @@ mod tests {
         let ghost = NodeId::Artifact(test_path("ghost.py"));
         let relation = Relation::new(
             from.clone(),
-            candidate.clone(),
+            RelationTarget::Ambiguous(vec![candidate.clone(), ghost]),
             RelationKind::Imports,
-            Confidence::Ambiguous,
-            vec![candidate.clone(), ghost],
+            Confidence::Deterministic,
             vec![test_range()],
             test_analyzer(),
         )
         .expect("test relation is evidenced");
-        let graph = Graph::new(BTreeSet::from([from, candidate]), vec![relation]);
         assert!(matches!(
-            graph.validate(),
+            Graph::try_new(
+                test_metadata(),
+                test_nodes(vec![from, candidate]),
+                vec![relation]
+            ),
             Err(GraphValidationError::DanglingEndpoint { .. })
         ));
     }
@@ -367,18 +562,15 @@ mod tests {
 
     #[test]
     fn confidence_states_are_all_addressable() {
-        // Pins the domain contract from docs/05: each state renders
-        // distinctly, so none can be silently merged into another.
+        // Assertion strength only: resolution outcome and operational
+        // failure live elsewhere by construction, so they cannot be merged
+        // back into this enum.
         let states = [
             (Confidence::Deterministic, "deterministic"),
             (Confidence::Probable, "probable"),
             (Confidence::Possible, "possible"),
-            (Confidence::Ambiguous, "ambiguous"),
-            (Confidence::Unknown, "unknown"),
-            (Confidence::Unsupported, "unsupported"),
-            (Confidence::Failed, "failed"),
         ];
-        assert_eq!(states.len(), 7);
+        assert_eq!(states.len(), 3);
         for (state, label) in states {
             assert_eq!(state.to_string(), label);
         }

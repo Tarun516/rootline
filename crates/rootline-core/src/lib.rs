@@ -19,6 +19,7 @@ pub enum RepoPathError {
     Empty,
     NotRelative,
     InvalidComponent,
+    NonUtf8Component,
 }
 
 impl fmt::Display for RepoPathError {
@@ -29,6 +30,7 @@ impl fmt::Display for RepoPathError {
             Self::InvalidComponent => {
                 f.write_str("repository path contains a non-normal component")
             }
+            Self::NonUtf8Component => f.write_str("repository path component is not valid UTF-8"),
         }
     }
 }
@@ -60,6 +62,32 @@ impl RepoPath {
     /// Borrows the original platform path without lossy text conversion.
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+
+    /// Canonical `/`-separated representation for persisted, protocol, and
+    /// test-comparison use. Native separators differ per platform, so neither
+    /// `display()` nor `as_path()` may serve as the canonical form: tests
+    /// comparing those break on Windows, and persistence would fork by OS.
+    ///
+    /// Components are joined, never byte-substituted, so a backslash inside
+    /// a Unix filename cannot corrupt into a separator.
+    ///
+    /// # Errors
+    /// Returns [`RepoPathError::NonUtf8Component`] when a component is not
+    /// valid UTF-8. Lossy conversion would silently merge distinct paths, so
+    /// it is refused explicitly instead.
+    pub fn to_canonical_string(&self) -> Result<String, RepoPathError> {
+        let mut parts = Vec::new();
+        for component in self.0.components() {
+            match component {
+                Component::Normal(part) => {
+                    let text = part.to_str().ok_or(RepoPathError::NonUtf8Component)?;
+                    parts.push(text);
+                }
+                _ => return Err(RepoPathError::InvalidComponent),
+            }
+        }
+        Ok(parts.join("/"))
     }
 }
 
@@ -97,6 +125,10 @@ pub struct Artifact {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixtures are static inputs; setup failure must fail the test immediately"
+)]
 mod tests {
     use super::*;
 
@@ -126,5 +158,29 @@ mod tests {
             );
         }
         assert_eq!(RepoPath::new(Path::new("")), Err(RepoPathError::Empty));
+    }
+
+    #[test]
+    fn canonical_form_is_platform_independent() {
+        // Joining native components with `/` keeps this assertion green on
+        // Windows, where `display()` would render backslashes.
+        let path = RepoPath::new(Path::new("fixtures/python/graph/shop/cart.py"))
+            .expect("fixture path is relative");
+        assert_eq!(
+            path.to_canonical_string().expect("path is UTF-8"),
+            "fixtures/python/graph/shop/cart.py"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_form_refuses_non_utf8_components() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = std::ffi::OsString::from_vec(b"src/\xff.py".to_vec());
+        let path = RepoPath::new(Path::new(&raw)).expect("bytes are a normal component");
+        assert_eq!(
+            path.to_canonical_string(),
+            Err(RepoPathError::NonUtf8Component)
+        );
     }
 }

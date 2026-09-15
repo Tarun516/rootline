@@ -34,6 +34,7 @@ use std::fmt;
 use std::path::{Component, PathBuf};
 
 use rootline_core::RepoPath;
+use rootline_core::RepoPathError;
 
 /// What module resolution established for one import statement.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,7 +139,14 @@ impl ModuleIndex {
         level: u32,
         module: Option<&str>,
     ) -> Resolution {
-        let mut components = path_components(importer.as_path());
+        let mut components = match path_components(importer.as_path()) {
+            Ok(components) => components,
+            Err(_) => {
+                return Resolution::Unknown {
+                    reason: "importing file path is not valid UTF-8".to_owned(),
+                };
+            }
+        };
         components.pop();
         for _ in 1..level {
             if components.pop().is_none() {
@@ -177,22 +185,31 @@ impl ModuleIndex {
         }
     }
 
-    /// Probes whether `name` is a submodule file next to an already-resolved
-    /// package file: for `from pkg import name`, after `pkg` resolves to a
-    /// file `F`, this checks `parent(F)/name.py` and
-    /// `parent(F)/name/__init__.py`. Names defined *inside* `F` are symbol
-    /// references, not submodules, and stay the graph builder's job — this
-    /// answers only the file question.
-    pub fn resolve_submodule(&self, package_file: &RepoPath, name: &str) -> Option<RepoPath> {
+    /// Probes whether `name` is a submodule file of an already-resolved
+    /// package: for `from pkg import name`, after `pkg` resolves to a file
+    /// `F`, this checks `parent(F)/name.py` and
+    /// `parent(F)/name/__init__.py` — but only when `F` is itself a package
+    /// (`__init__.py`). A regular module file has no submodules by that
+    /// path, so probing its siblings would manufacture false targets;
+    /// names inside modules stay symbol references instead.
+    pub fn resolve_submodule(
+        &self,
+        package_file: &RepoPath,
+        name: &str,
+    ) -> Result<Option<RepoPath>, RepoPathError> {
+        use std::ffi::OsStr;
         if name.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let mut components = path_components(package_file.as_path());
+        if package_file.as_path().file_name() != Some(OsStr::new("__init__.py")) {
+            return Ok(None);
+        }
+        let mut components = path_components(package_file.as_path())?;
         components.pop();
         components.push(name.to_owned());
-        join_candidates(&components)
+        Ok(join_candidates(&components)
             .into_iter()
-            .find(|candidate| self.files.contains(candidate))
+            .find(|candidate| self.files.contains(candidate)))
     }
 }
 
@@ -242,11 +259,19 @@ fn join_candidates(components: &[String]) -> Vec<RepoPath> {
 }
 
 /// Normal path components of a validated repository path.
-fn path_components(path: &std::path::Path) -> Vec<String> {
+///
+/// # Errors
+/// Returns [`RepoPathError::NonUtf8Component`] instead of silently dropping
+/// an unrepresentable component, which could otherwise merge distinct paths
+/// (e.g. `foo/<non-utf8>/bar.py` resolving as `foo/bar.py`).
+fn path_components(path: &std::path::Path) -> Result<Vec<String>, RepoPathError> {
     path.components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str().map(str::to_owned),
-            _ => None,
+        .map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(str::to_owned)
+                .ok_or(RepoPathError::NonUtf8Component),
+            _ => Err(RepoPathError::InvalidComponent),
         })
         .collect()
 }
@@ -388,20 +413,48 @@ mod tests {
         let index = index();
         assert_eq!(
             index.resolve_submodule(&repo_path("src/shop/__init__.py"), "cart"),
-            Some(repo_path("src/shop/cart.py"))
+            Ok(Some(repo_path("src/shop/cart.py")))
         );
         assert_eq!(
             index.resolve_submodule(&repo_path("src/shop/__init__.py"), "store"),
-            Some(repo_path("src/shop/store/__init__.py"))
+            Ok(Some(repo_path("src/shop/store/__init__.py")))
         );
         assert_eq!(
             index.resolve_submodule(&repo_path("src/shop/__init__.py"), "ghost"),
-            None
+            Ok(None)
         );
         assert_eq!(
             index.resolve_submodule(&repo_path("src/shop/__init__.py"), ""),
-            None
+            Ok(None)
         );
+    }
+
+    #[test]
+    fn module_files_have_no_submodules() {
+        // `from mod import sub` where `mod.py` is a plain module file must
+        // not match `sub.py` sitting next to it: siblings are not children.
+        let index = ModuleIndex::new(Vec::new(), vec![repo_path("mod.py"), repo_path("sub.py")]);
+        assert_eq!(
+            index.resolve_submodule(&repo_path("mod.py"), "sub"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn non_utf8_importer_paths_are_unknown_not_silent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let raw = std::ffi::OsString::from_vec(b"src/\xff.py".to_vec());
+            let importer = RepoPath::new(std::path::Path::new(&raw)).expect("bytes are normal");
+            let index = ModuleIndex::new(Vec::new(), vec![importer.clone()]);
+            assert_eq!(
+                index.resolve_relative(&importer, 1, Some("sibling")),
+                Resolution::Unknown {
+                    reason: "importing file path is not valid UTF-8".to_owned()
+                }
+            );
+        }
     }
 
     #[test]

@@ -41,6 +41,18 @@ A partially analyzed repository may classify a missing-internal module as extern
 
 Nine resolver unit tests pin absolute, relative, package, submodule, ambiguity, escape, and empty-root behavior; eight graph tests pin a 23-node, 34-relation fixture package edge-for-edge plus every diagnostic; `Graph::validate` rejects dangling endpoints at publication.
 
+## Amendment (2026-09-15, hardening slice)
+
+Two refinements landed without changing the decision above:
+
+- Submodule probing (`from pkg import name`) applies only when the
+  resolved package file is an `__init__.py`. A regular module file has no
+  submodules by that path, so probing its siblings manufactured false
+  targets; names inside modules stay symbol references.
+- Non-UTF-8 path components resolve to explicit `Unknown` outcomes with a
+  reason instead of silently dropping components, which could have merged
+  distinct paths during resolution.
+
 ## Revisit triggers
 
 Measured false-definite resolutions on the R0 corpus, stdlib/third-party classification needs, dynamic-import coverage demands, or a second language forcing a shared resolution contract.

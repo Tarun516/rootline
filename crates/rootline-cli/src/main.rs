@@ -1,7 +1,6 @@
 use rootline_core::RepoPath;
 use rootline_core::ir::AnalysisStatus;
-use rootline_engine::inventory::{ListingMode, scan};
-use rootline_engine::python::{PythonAdapter, supports_extension};
+use rootline_engine::{ListingMode, PythonAdapter, scan, supports_extension};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -135,7 +134,7 @@ fn symbols(path: &Path) -> ExitCode {
                     Some(owner) => println!(
                         "{}\t{}.{}\t{}..{}\t{}..{}",
                         symbol.id().kind(),
-                        owner,
+                        owner.full_path(),
                         symbol.id().name(),
                         range.bytes().start().get(),
                         range.bytes().end().get(),
@@ -159,7 +158,13 @@ fn symbols(path: &Path) -> ExitCode {
                 let names = import
                     .names()
                     .iter()
-                    .map(|name| name.as_str())
+                    .map(|name| {
+                        if name.imported() == name.bound().as_str() {
+                            name.bound().as_str().to_owned()
+                        } else {
+                            format!("{} as {}", name.imported(), name.bound().as_str())
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 println!(
@@ -201,14 +206,12 @@ fn relative_identity(path: &Path) -> Option<RepoPath> {
     if let Ok(relative) = RepoPath::new(path) {
         return Some(relative);
     }
-    if path.is_absolute() {
-        if let Ok(current) = env::current_dir() {
-            if let Ok(stripped) = path.strip_prefix(&current) {
-                if let Ok(relative) = RepoPath::new(stripped) {
-                    return Some(relative);
-                }
-            }
-        }
+    if path.is_absolute()
+        && let Ok(current) = env::current_dir()
+        && let Ok(stripped) = path.strip_prefix(&current)
+        && let Ok(relative) = RepoPath::new(stripped)
+    {
+        return Some(relative);
     }
     None
 }

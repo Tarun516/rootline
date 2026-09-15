@@ -1,0 +1,14 @@
+# Rootline line-ending and encoding policy.
+#
+# Exact byte offsets are evidence coordinates, so fixtures and benchmark
+# oracles must check out with stable bytes on every platform. Windows
+# checkouts default to CRLF without these rules, which silently shifts
+# every pinned source range.
+
+# Python fixtures: parsing and byte-range tests depend on LF bytes.
+/fixtures/** text eol=lf
+
+# Benchmark oracles and runner scripts: exact-path diffs and execution.
+# Extend the `linguist-language` style per-language lines below when the
+# TypeScript slice adds its fixtures.
+/benchmarks/** text eol=lf
