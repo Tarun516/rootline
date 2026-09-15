@@ -34,3 +34,4 @@ Architecture decision records explain consequential choices and preserve the con
 | [0003-outcomes-errors-and-observability.md](0003-outcomes-errors-and-observability.md) | Typed operational errors, explicit analysis outcomes, diagnostics, and tracing |
 | [0004-code-intelligence-ir.md](0004-code-intelligence-ir.md) | Owned language-neutral IR in `rootline-core` with typed coordinates, identities, and outcomes |
 | [0005-tree-sitter-packaging.md](0005-tree-sitter-packaging.md) | Tree-sitter runtime plus crates.io grammar crates contained inside language adapters |
+| [0006-python-module-resolution.md](0006-python-module-resolution.md) | Python import resolution over an explicit file set with visible ambiguous/unknown/external outcomes |

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+pub mod graph;
 pub mod ir;
 
 /// A lexical repository-relative path containing only normal components.

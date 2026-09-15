@@ -212,7 +212,7 @@ impl fmt::Display for SymbolName {
 }
 
 /// Kind of program entity an adapter extracted.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SymbolKind {
     Function,
     Class,
@@ -233,7 +233,7 @@ impl fmt::Display for SymbolKind {
 /// owner chain, and declared name. Line ranges are evidence, not identity, so
 /// they are deliberately excluded: a symbol keeps its identity when lines
 /// shift within a revision scope.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SymbolId {
     file: RepoPath,
     kind: SymbolKind,
@@ -316,17 +316,22 @@ pub struct ImportStatement {
     module: Option<String>,
     names: Vec<SymbolName>,
     is_wildcard: bool,
+    is_from: bool,
 }
 
 impl ImportStatement {
     /// Builds one normalized import fact per imported module: a plain
     /// `import a, b` is represented as two facts sharing one source range.
+    /// `is_from` records the statement form because `import a.b as c`
+    /// (binds the module) and `from a.b import c` (binds a name inside it)
+    /// are otherwise indistinguishable yet bind different things.
     pub fn new(
         range: SourceRange,
         level: u32,
         module: Option<String>,
         names: Vec<SymbolName>,
         is_wildcard: bool,
+        is_from: bool,
     ) -> Self {
         Self {
             range,
@@ -334,6 +339,7 @@ impl ImportStatement {
             module,
             names,
             is_wildcard,
+            is_from,
         }
     }
 
@@ -360,6 +366,97 @@ impl ImportStatement {
     /// Whether this statement is a `from module import *` wildcard.
     pub fn is_wildcard(&self) -> bool {
         self.is_wildcard
+    }
+
+    /// Whether this is a `from`-form import (binds names inside the module)
+    /// as opposed to a plain `import` (binds the module itself).
+    pub fn is_from(&self) -> bool {
+        self.is_from
+    }
+}
+
+/// How a call names its target. `Absent` (`f()`) may resolve through scope
+/// and imports; `Named` (`self.fit()`, `mod.run()`) resolves through its
+/// receiver; `Opaque` (`factory().make()`, `a[0]()`) carries a callee name
+/// that must never match a bare in-scope definition, since the qualifier
+/// proves the callee is not the local name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallReceiver {
+    Absent,
+    Named(SymbolName),
+    Opaque,
+}
+
+/// One call expression as written: the callee's final name segment, how it
+/// was qualified, the calling scope (or `None` for module top-level code),
+/// and its source range.
+///
+/// Target resolution belongs to the graph stage; this struct is the
+/// syntax-level fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallSite {
+    caller: Option<SymbolId>,
+    receiver: CallReceiver,
+    name: SymbolName,
+    range: SourceRange,
+}
+
+impl CallSite {
+    pub fn new(
+        caller: Option<SymbolId>,
+        receiver: CallReceiver,
+        name: SymbolName,
+        range: SourceRange,
+    ) -> Self {
+        Self {
+            caller,
+            receiver,
+            name,
+            range,
+        }
+    }
+
+    pub fn caller(&self) -> Option<&SymbolId> {
+        self.caller.as_ref()
+    }
+
+    pub fn receiver(&self) -> &CallReceiver {
+        &self.receiver
+    }
+
+    pub fn name(&self) -> &SymbolName {
+        &self.name
+    }
+
+    pub fn range(&self) -> SourceRange {
+        self.range
+    }
+}
+
+/// One base-class reference as written in a class header: the dotted path
+/// text (`Base`, `pkg.Base`, `nn.Module`), not a resolved target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Inheritance {
+    class: SymbolId,
+    base: String,
+    range: SourceRange,
+}
+
+impl Inheritance {
+    pub fn new(class: SymbolId, base: String, range: SourceRange) -> Self {
+        Self { class, base, range }
+    }
+
+    pub fn class(&self) -> &SymbolId {
+        &self.class
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub fn range(&self) -> SourceRange {
+        self.range
     }
 }
 
@@ -431,41 +528,62 @@ impl AnalyzerInfo {
     }
 }
 
+/// The extracted contents of one analyzed file. An empty body is
+/// semantically valid (an empty file parses to nothing), so `Default` holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModuleBody {
+    pub symbols: Vec<Symbol>,
+    pub imports: Vec<ImportStatement>,
+    pub calls: Vec<CallSite>,
+    pub inheritances: Vec<Inheritance>,
+    pub parse_errors: Vec<ParseError>,
+}
+
 /// Normalized per-file result every language adapter must produce.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedModule {
+    file: RepoPath,
     language: Language,
     analyzer: AnalyzerInfo,
     status: AnalysisStatus,
-    symbols: Vec<Symbol>,
-    imports: Vec<ImportStatement>,
-    parse_errors: Vec<ParseError>,
+    body: ModuleBody,
 }
 
 impl ParsedModule {
-    /// Builds a module, canonicalizing symbol order by byte offset so
+    /// Builds a module, canonicalizing collection order by byte offset so
     /// repeated runs and snapshot tests observe deterministic output
     /// regardless of traversal order.
     pub fn new(
+        file: RepoPath,
         language: Language,
         analyzer: AnalyzerInfo,
         status: AnalysisStatus,
-        mut symbols: Vec<Symbol>,
-        mut imports: Vec<ImportStatement>,
-        parse_errors: Vec<ParseError>,
+        mut body: ModuleBody,
     ) -> Self {
-        symbols
+        body.symbols
             .sort_by_key(|symbol| (symbol.range().bytes().start(), symbol.range().bytes().end()));
-        imports
+        body.imports
             .sort_by_key(|import| (import.range().bytes().start(), import.range().bytes().end()));
+        body.calls
+            .sort_by_key(|call| (call.range().bytes().start(), call.range().bytes().end()));
+        body.inheritances.sort_by_key(|inheritance| {
+            (
+                inheritance.range().bytes().start(),
+                inheritance.range().bytes().end(),
+            )
+        });
         Self {
+            file,
             language,
             analyzer,
             status,
-            symbols,
-            imports,
-            parse_errors,
+            body,
         }
+    }
+
+    /// Repository-relative identity of the analyzed file.
+    pub fn file(&self) -> &RepoPath {
+        &self.file
     }
 
     pub fn language(&self) -> Language {
@@ -482,16 +600,26 @@ impl ParsedModule {
 
     /// Symbols in deterministic byte-offset order.
     pub fn symbols(&self) -> &[Symbol] {
-        &self.symbols
+        &self.body.symbols
     }
 
     /// Imports in deterministic byte-offset order.
     pub fn imports(&self) -> &[ImportStatement] {
-        &self.imports
+        &self.body.imports
+    }
+
+    /// Call sites in deterministic byte-offset order.
+    pub fn calls(&self) -> &[CallSite] {
+        &self.body.calls
+    }
+
+    /// Base-class references in deterministic byte-offset order.
+    pub fn inheritances(&self) -> &[Inheritance] {
+        &self.body.inheritances
     }
 
     pub fn parse_errors(&self) -> &[ParseError] {
-        &self.parse_errors
+        &self.body.parse_errors
     }
 }
 
@@ -631,12 +759,14 @@ mod tests {
         let late = test_symbol(SymbolKind::Function, None, "zebra");
         let early = test_symbol(SymbolKind::Function, None, "apple");
         let module = ParsedModule::new(
+            test_path(),
             Language::Python,
             AnalyzerInfo::new("test", "0.0.0"),
             AnalysisStatus::Succeeded,
-            vec![late, early],
-            Vec::new(),
-            Vec::new(),
+            ModuleBody {
+                symbols: vec![late, early],
+                ..ModuleBody::default()
+            },
         );
         assert_eq!(module.symbols().len(), 2);
         assert!(validate_module(&module).is_ok());
@@ -645,15 +775,17 @@ mod tests {
     #[test]
     fn validation_rejects_duplicate_symbol_identities() {
         let module = ParsedModule::new(
+            test_path(),
             Language::Python,
             AnalyzerInfo::new("test", "0.0.0"),
             AnalysisStatus::Succeeded,
-            vec![
-                test_symbol(SymbolKind::Function, None, "train"),
-                test_symbol(SymbolKind::Function, None, "train"),
-            ],
-            Vec::new(),
-            Vec::new(),
+            ModuleBody {
+                symbols: vec![
+                    test_symbol(SymbolKind::Function, None, "train"),
+                    test_symbol(SymbolKind::Function, None, "train"),
+                ],
+                ..ModuleBody::default()
+            },
         );
         assert_eq!(
             validate_module(&module),
@@ -666,15 +798,17 @@ mod tests {
     #[test]
     fn same_name_with_different_owners_is_not_a_duplicate() {
         let module = ParsedModule::new(
+            test_path(),
             Language::Python,
             AnalyzerInfo::new("test", "0.0.0"),
             AnalysisStatus::Succeeded,
-            vec![
-                test_symbol(SymbolKind::Method, Some("AudioModel"), "fit"),
-                test_symbol(SymbolKind::Method, Some("Trainer"), "fit"),
-            ],
-            Vec::new(),
-            Vec::new(),
+            ModuleBody {
+                symbols: vec![
+                    test_symbol(SymbolKind::Method, Some("AudioModel"), "fit"),
+                    test_symbol(SymbolKind::Method, Some("Trainer"), "fit"),
+                ],
+                ..ModuleBody::default()
+            },
         );
         assert!(validate_module(&module).is_ok());
     }

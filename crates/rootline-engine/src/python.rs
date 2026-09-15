@@ -10,18 +10,22 @@
 //!   declarations with lexical owners and source ranges;
 //! - `import` / `from ... import` syntax facts, normalized to one fact per
 //!   imported module;
+//! - call sites with callee names and identifier receivers (no target
+//!   resolution; that belongs to the graph stage);
+//! - identifier and attribute base classes from class headers;
 //! - partial recovery: files with syntax errors still yield their intact
 //!   symbols with a [`rootline_core::ir::AnalysisStatus::Partial`] status.
 //!
 //! Known limits (tracked for the next adapter slice, not hidden): parameters,
-//! return annotations, decorators, call/reference extraction, and column
+//! return annotations, decorators (including calls inside decorators),
+//! parametrized bases (`Generic[T]`) and class keywords, and column
 //! coordinates are not extracted yet.
 
 use rootline_core::RepoPath;
 use rootline_core::ir::{
-    AnalysisStatus, AnalyzerInfo, ByteOffset, ByteRange, CoordinateError, ImportStatement,
-    IrValidationError, Language, LineNumber, LineRange, ParseError, ParsedModule, SourceRange,
-    Symbol, SymbolId, SymbolKind, SymbolName,
+    AnalysisStatus, AnalyzerInfo, ByteOffset, ByteRange, CallReceiver, CallSite, CoordinateError,
+    ImportStatement, Inheritance, IrValidationError, Language, LineNumber, LineRange, ModuleBody,
+    ParseError, ParsedModule, SourceRange, Symbol, SymbolId, SymbolKind, SymbolName,
 };
 use std::fmt;
 use std::path::Path;
@@ -163,12 +167,16 @@ struct Extraction {
     scope: Vec<ScopeFrame>,
     symbols: Vec<Symbol>,
     imports: Vec<ImportStatement>,
+    calls: Vec<CallSite>,
+    inheritances: Vec<Inheritance>,
     parse_errors: Vec<ParseError>,
 }
 
-/// One lexically enclosing named block around the node being visited.
+/// One lexically enclosing named block around the node being visited. The
+/// frame carries the scope's symbol identity so call sites can name their
+/// caller without re-deriving it from text.
 struct ScopeFrame {
-    name: String,
+    id: SymbolId,
     is_class: bool,
 }
 
@@ -179,6 +187,8 @@ impl Extraction {
             scope: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
+            calls: Vec::new(),
+            inheritances: Vec::new(),
             parse_errors: Vec::new(),
         }
     }
@@ -191,12 +201,18 @@ impl Extraction {
         let path = self
             .scope
             .iter()
-            .map(|frame| frame.name.as_str())
+            .map(|frame| frame.id.name().as_str())
             .collect::<Vec<_>>()
             .join(".");
         SymbolName::new(&path)
             .map(Some)
             .map_err(PythonAdapterError::from)
+    }
+
+    /// Identity of the innermost enclosing scope (`None` for module top-level
+    /// code), used as the caller of recorded call sites.
+    fn caller(&self) -> Option<SymbolId> {
+        self.scope.last().map(|frame| frame.id.clone())
     }
 
     fn finish(self) -> Result<ParsedModule, PythonAdapterError> {
@@ -211,12 +227,17 @@ impl Extraction {
             }
         };
         Ok(ParsedModule::new(
+            self.file.clone(),
             Language::Python,
             AnalyzerInfo::new(ADAPTER_NAME, ADAPTER_VERSION),
             status,
-            self.symbols,
-            self.imports,
-            self.parse_errors,
+            ModuleBody {
+                symbols: self.symbols,
+                imports: self.imports,
+                calls: self.calls,
+                inheritances: self.inheritances,
+                parse_errors: self.parse_errors,
+            },
         ))
     }
 
@@ -243,6 +264,7 @@ impl Extraction {
             "decorated_definition" => self.visit_decorated(node, source),
             "import_statement" => self.visit_plain_import(node, source),
             "import_from_statement" => self.visit_from_import(node, source),
+            "call" => self.visit_call(node, source),
             _ => self.visit_children(node, source),
         }
     }
@@ -281,11 +303,17 @@ impl Extraction {
             } else {
                 SymbolKind::Function
             };
-            let frame_name = name.as_str().to_owned();
             let id = SymbolId::new(self.file.clone(), symbol_kind, self.owner()?, name);
             self.symbols.push(Symbol::new(id, node_range(node)?)?);
+            let frame_id = self
+                .symbols
+                .last()
+                .map(|symbol| symbol.id().clone())
+                .ok_or(PythonAdapterError::InvalidNode {
+                    detail: "just-pushed function symbol is missing",
+                })?;
             self.scope.push(ScopeFrame {
-                name: frame_name,
+                id: frame_id,
                 is_class: false,
             });
             self.visit_children(node, source)?;
@@ -299,11 +327,18 @@ impl Extraction {
     fn visit_class(&mut self, node: Node<'_>, source: &str) -> Result<(), PythonAdapterError> {
         if let Some(name_node) = node.child_by_field_name("name") {
             let name = SymbolName::new(node_text(name_node, source)?)?;
-            let frame_name = name.as_str().to_owned();
             let id = SymbolId::new(self.file.clone(), SymbolKind::Class, self.owner()?, name);
             self.symbols.push(Symbol::new(id, node_range(node)?)?);
+            let frame_id = self
+                .symbols
+                .last()
+                .map(|symbol| symbol.id().clone())
+                .ok_or(PythonAdapterError::InvalidNode {
+                    detail: "just-pushed class symbol is missing",
+                })?;
+            self.visit_superclasses(node, source, &frame_id)?;
             self.scope.push(ScopeFrame {
-                name: frame_name,
+                id: frame_id,
                 is_class: true,
             });
             self.visit_children(node, source)?;
@@ -317,8 +352,74 @@ impl Extraction {
     fn visit_decorated(&mut self, node: Node<'_>, source: &str) -> Result<(), PythonAdapterError> {
         // The symbol range covers the `def`/`class` statement itself;
         // decorators stay uninterpreted in this revision (see module docs).
+        // Because decorator subtrees are never walked, call expressions
+        // inside decorators are not recorded as call sites either.
         if let Some(definition) = node.child_by_field_name("definition") {
             self.visit_node(definition, source)?;
+        }
+        Ok(())
+    }
+
+    /// Records one call expression: the callee's final name segment and how
+    /// it was qualified. Bare `f()` calls may resolve through scope and
+    /// imports; `receiver.name()` calls resolve through the receiver; complex
+    /// qualifiers (`factory().make()`, `a[0]()`) are opaque so the graph
+    /// stage never matches their bare name against a local definition.
+    fn visit_call(&mut self, node: Node<'_>, source: &str) -> Result<(), PythonAdapterError> {
+        let Some(function) = node.child_by_field_name("function") else {
+            return self.visit_children(node, source);
+        };
+        let (receiver, name) = match function.kind() {
+            "identifier" => (CallReceiver::Absent, node_text(function, source)?),
+            "attribute" => {
+                let attribute = function.child_by_field_name("attribute").ok_or(
+                    PythonAdapterError::InvalidNode {
+                        detail: "attribute call without attribute name",
+                    },
+                )?;
+                let receiver = match function.child_by_field_name("object") {
+                    Some(object) if object.kind() == "identifier" => {
+                        CallReceiver::Named(SymbolName::new(node_text(object, source)?)?)
+                    }
+                    _ => CallReceiver::Opaque,
+                };
+                (receiver, node_text(attribute, source)?)
+            }
+            _ => return self.visit_children(node, source),
+        };
+        self.calls.push(CallSite::new(
+            self.caller(),
+            receiver,
+            SymbolName::new(name)?,
+            node_range(node)?,
+        ));
+        self.visit_children(node, source)
+    }
+
+    /// Records the identifier and attribute base classes named in a class
+    /// header. Parametrized bases (`Generic[T]`), calls, and keywords
+    /// (`metaclass=...`) are not extracted in this revision: recording their
+    /// raw text as a dependency target would manufacture bogus externals, and
+    /// skipping them keeps the gap explicit instead of hidden.
+    fn visit_superclasses(
+        &mut self,
+        node: Node<'_>,
+        source: &str,
+        class: &SymbolId,
+    ) -> Result<(), PythonAdapterError> {
+        let Some(superclasses) = node.child_by_field_name("superclasses") else {
+            return Ok(());
+        };
+        let mut cursor = superclasses.walk();
+        for child in superclasses.named_children(&mut cursor) {
+            if child.kind() != "identifier" && child.kind() != "attribute" {
+                continue;
+            }
+            self.inheritances.push(Inheritance::new(
+                class.clone(),
+                node_text(child, source)?.to_owned(),
+                node_range(child)?,
+            ));
         }
         Ok(())
     }
@@ -343,6 +444,7 @@ impl Extraction {
                 0,
                 Some(module),
                 vec![SymbolName::new(&bound)?],
+                false,
                 false,
             ));
         }
@@ -387,6 +489,7 @@ impl Extraction {
             module,
             names,
             is_wildcard,
+            true,
         ));
         Ok(())
     }
@@ -512,10 +615,14 @@ mod tests {
 
     fn parse_fixture(name: &str) -> ParsedModule {
         let source = std::fs::read_to_string(fixture_path(name)).expect("read Python fixture");
+        parse_source(name, &source)
+    }
+
+    pub(super) fn parse_source(name: &str, source: &str) -> ParsedModule {
         let repo_path = RepoPath::new(Path::new(name)).expect("fixture name is relative");
         PythonAdapter::new()
             .expect("adapter builds")
-            .parse(&repo_path, &source)
+            .parse(&repo_path, source)
             .expect("fixture parses without adapter failure")
     }
 
@@ -723,5 +830,90 @@ mod tests {
             range.lines().start().get(),
             range.lines().end().get(),
         )
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    use super::tests::parse_source;
+    use rootline_core::ir::CallReceiver;
+
+    const SOURCE: &str = "import os\n\
+        \n\
+        \n\
+        class Base:\n\
+        \x20   pass\n\
+        \n\
+        \n\
+        class Child(Base, mix.Mixin, Generic[T], metaclass=Meta):\n\
+        \x20   def run(self):\n\
+        \x20       train()\n\
+        \x20       self.run()\n\
+        \x20       os.remove(item)\n\
+        \x20       factory().make()\n\
+        \n\
+        \n\
+        configure()\n";
+
+    fn receiver_label(receiver: &CallReceiver) -> String {
+        match receiver {
+            CallReceiver::Absent => "-".to_owned(),
+            CallReceiver::Named(name) => name.as_str().to_owned(),
+            CallReceiver::Opaque => "?".to_owned(),
+        }
+    }
+
+    #[test]
+    fn extracts_call_shapes_with_callers() {
+        let module = parse_source("calls.py", SOURCE);
+        let calls: Vec<_> = module
+            .calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.caller()
+                        .map(|caller| caller.name().as_str().to_owned()),
+                    receiver_label(call.receiver()),
+                    call.name().as_str().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (Some("run".to_owned()), "-".to_owned(), "train".to_owned()),
+                (Some("run".to_owned()), "self".to_owned(), "run".to_owned()),
+                (Some("run".to_owned()), "os".to_owned(), "remove".to_owned()),
+                // `factory().make()` yields both calls: the inner bare
+                // `factory()` and the outer opaquely-qualified `make()`.
+                (Some("run".to_owned()), "-".to_owned(), "factory".to_owned()),
+                (Some("run".to_owned()), "?".to_owned(), "make".to_owned()),
+                (None, "-".to_owned(), "configure".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_plain_bases_and_skips_exotic_ones() {
+        let module = parse_source("calls.py", SOURCE);
+        let bases: Vec<_> = module
+            .inheritances()
+            .iter()
+            .map(|inheritance| {
+                (
+                    inheritance.class().name().as_str().to_owned(),
+                    inheritance.base().to_owned(),
+                )
+            })
+            .collect();
+        // `Generic[T]` (subscript) and `metaclass=Meta` (keyword) are
+        // recorded nowhere: raw text would manufacture bogus externals.
+        assert_eq!(
+            bases,
+            [
+                ("Child".to_owned(), "Base".to_owned()),
+                ("Child".to_owned(), "mix.Mixin".to_owned()),
+            ]
+        );
     }
 }

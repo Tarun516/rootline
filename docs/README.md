@@ -39,7 +39,7 @@ This directory is the consolidated product and engineering plan for Rootline. It
 
 ## Current phase
 
-Rootline has begun its first Rust vertical slice. The minimal workspace, inventory CLI, Python parsing into a normalized Code Intelligence IR, and a `rootline symbols` inspection command are implemented; import resolution, graph persistence, and the product client remain future capabilities. See [implementation-tracker.md](implementation-tracker.md) for dated status and verification. Design checkpoints still govern each new slice.
+Rootline has begun its first Rust vertical slice. The minimal workspace, inventory CLI, Python parsing into a normalized Code Intelligence IR, a `rootline symbols` inspection command, and Python import resolution with symbol-graph construction are implemented; graph persistence and the product client remain future capabilities. See [implementation-tracker.md](implementation-tracker.md) for dated status and verification. Design checkpoints still govern each new slice.
 
 ## Documentation maintenance
 

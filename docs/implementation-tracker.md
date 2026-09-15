@@ -10,11 +10,20 @@ This file records what has been implemented, when, how it was verified, and what
 | Minimal Rust workspace | Done | Three real crates; pinned toolchain, lockfile, lint policy, CI, formatting/check/Clippy/tests passed locally |
 | First repository inventory CLI | Done with declared limits | Git ignore-aware listing, non-Git fallback, symlink checks, deterministic output; 4 tests and clean-archive benchmark passed |
 | Python Code Intelligence IR | Done with declared limits | Owned IR in `rootline-core::ir` (typed coordinates, identities, outcomes, publication validation); Tree-sitter Python adapter with 4 fixtures and 7 tests; `rootline symbols` inspection; ADRs 0004/0005 |
-| Python import resolution and symbol graph | Not started | Requires IR |
+| Python import resolution and symbol graph | Done with declared limits | `ModuleIndex` resolver (absolute/relative, ambiguous/unknown/external) and `graph` builder (containment, imports, inheritance, conservative calls) with confidence, evidence, and diagnostics; 7-file fixture package asserts 23 nodes and 34 relations edge-for-edge; [ADR 0006](adrs/0006-python-module-resolution.md) |
 | SQLite and incremental engine | Not started | Requires fact graph |
 | React/TypeScript/Vite client | Not started | Requires local query protocol |
 
 ## Chronological log
+
+### 2026-09-15 12:45 IST — Python import resolution and symbol graph
+
+- Implemented: `rootline-core::graph` (nodes, relations, confidence states, evidence requirement, publication validation) and `rootline-engine::{resolve, graph}` — package-aware import resolution plus a fact-graph builder emitting containment, import, inheritance, and conservatively resolved call edges with per-fact provenance. Unprovable facts stay visible as `GraphDiagnostic`s, never guessed edges.
+- Implemented: IR additions that the slice genuinely needed — `CallSite` with a three-way receiver (`Absent`/`Named`/`Opaque`), `Inheritance` facts, plain-vs-`from` form on imports, file identity on `ParsedModule`, and a `ModuleBody` grouping after Clippy flagged a 9-argument constructor.
+- Evidence: 42 tests pass (13 core, 29 engine), including 9 resolver unit tests and 8 graph tests over a 7-file fixture package asserting 23 nodes and 34 relations edge-for-edge; `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings` clean. (Note: the sandbox `/tmp` quota was exhausted during this slice, so tests were run with `TMPDIR=~/tmp-rootline`; no repo change was needed.)
+- Limitations: no `rootline graph` CLI (needs tested root discovery); builtin base classes diagnose as unknown; dynamic imports uncovered; partial file sets may classify missing-internal modules as external; call targets outside the credible set stay unknown by design.
+- Next gate: SQLite persistence and incremental engine over this graph.
+- Added [ADR 0006](adrs/0006-python-module-resolution.md).
 
 ### 2026-09-15 11:47 IST — Reproducible R0 benchmark, toolchain update, Python IR slice
 
