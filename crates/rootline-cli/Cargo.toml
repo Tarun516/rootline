@@ -1,0 +1,15 @@
+[package]
+name = "rootline-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rootline"
+path = "src/main.rs"
+
+[dependencies]
+rootline-engine = { path = "../rootline-engine" }
+
+[lints]
+workspace = true

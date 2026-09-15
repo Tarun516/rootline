@@ -22,6 +22,7 @@ This directory is the consolidated product and engineering plan for Rootline. It
 | [14-repository-organization.md](14-repository-organization.md) | Cargo/pnpm monorepo, crate boundaries, frontend organization, and protocol DTOs |
 | [15-errors-and-diagnostics.md](15-errors-and-diagnostics.md) | Typed operational errors, analysis outcomes, diagnostics, public errors, and tracing |
 | [16-configuration-security-portability.md](16-configuration-security-portability.md) | Explicit configuration, local security, source privacy, and cross-platform behavior |
+| [implementation-tracker.md](implementation-tracker.md) | Dated capability status, implementation history, verification, and next gates |
 | [glossary.md](glossary.md) | Shared terminology |
 | [adrs/README.md](adrs/README.md) | Architecture decision record process and index |
 | [engineering/README.md](engineering/README.md) | Engineering learning notebook and proposed topics |
@@ -38,7 +39,7 @@ This directory is the consolidated product and engineering plan for Rootline. It
 
 ## Current phase
 
-Rootline is currently in its planning stage. Implementation should begin only after the initial benchmark corpus, evaluation questions, minimal IR contract, and first architecture decisions are explicitly accepted.
+Rootline has begun its first Rust vertical slice. The minimal workspace and inventory CLI are implemented; Python parsing, normalized Code Intelligence IR, graph persistence, and the product client remain future capabilities. See [implementation-tracker.md](implementation-tracker.md) for dated status and verification. Design checkpoints still govern each new slice.
 
 ## Documentation maintenance
 

@@ -6,12 +6,12 @@ This file defines the working rules for coding agents operating anywhere inside 
 
 - The project name is **Rootline**.
 - Use `Rootline` in prose and `rootline` for package, crate, binary, directory, and command names unless a language convention requires otherwise.
-- Do not introduce former working names, competitor names, copied branding, external-project revision details, or source-specific comparisons into repository content.
+- Do not introduce former working names, competitor names, copied branding, or source-specific comparisons into repository content. Explicit benchmark and evaluation material may name its corpus source and pin a revision.
 - Rootline's implementation, schemas, prompts, interface, assets, and documentation must be independently authored.
 
 ## Current project state
 
-Rootline is currently documentation-first. The accepted material lives in:
+Rootline began with documentation and now has a minimal Rust workspace plus inventory CLI. The accepted material lives in:
 
 - `README.md` for the public project overview;
 - `docs/README.md` for the documentation map and authority rules;
@@ -21,6 +21,7 @@ Rootline is currently documentation-first. The accepted material lives in:
 - `docs/05-core-model-and-provenance.md` for the conceptual data model;
 - `docs/09-capability-roadmap.md` and `docs/10-first-90-days.md` for sequencing;
 - `docs/engineering/rust-engineering-rules.md` for binding Rust implementation rules.
+- `docs/implementation-tracker.md` for dated implementation and verification history.
 
 Do not add production implementation merely because the roadmap describes it. Implement only the capability explicitly requested for the current task.
 
@@ -134,6 +135,16 @@ After changing code:
 4. Report commands run, results, limitations, and unverified behavior.
 5. Update docs and add an ADR if a stable contract or architectural decision changed.
 
+## Code quality rules for every language
+
+These rules apply whenever code is added or changed, including tests, scripts, and client code. Language-specific conventions and the binding Rust rules still apply.
+
+- Choose meaningful, domain-specific names for files, modules, types, functions, variables, tests, and errors. A name should reveal the role or behavior without requiring the reader to trace its implementation. Follow the language's standard casing conventions and use the same term for the same concept across code, protocol, tests, and docs. Avoid vague names such as `data`, `thing`, `manager`, or unexplained abbreviations unless the surrounding scope makes them precise.
+- Write comments and API documentation where they add understanding: explain intent, invariants, non-obvious behavior, assumptions, tradeoffs, and security or correctness constraints near the code they govern. Document public contracts, especially meaningful failure conditions and limitations. Do not add comments that merely repeat the code, and keep comments accurate when behavior changes.
+- Handle expected failures explicitly and at the right boundary. Preserve useful context and typed errors or declared analysis outcomes; never silently ignore an error, hide it behind an empty success, or panic on untrusted input. Make recovery, partial results, and user-visible messages safe and understandable. Test failure paths as well as successful paths.
+- Follow established project boundaries and idiomatic practices for the language. Prefer simple, cohesive, testable code; validate untrusted input; avoid unnecessary dependencies, duplicated logic, broad visibility, and speculative abstractions. Check security, portability, determinism, and resource use when relevant.
+- Before considering a code change complete, review names and comments for clarity and accuracy, inspect error paths, add or update focused tests, and run applicable formatter, linter, type/static checks, and tests. Record any checks that could not be run and the remaining limitations in the handoff and implementation tracker.
+
 ## Analysis result requirements
 
 Operational errors and analysis outcomes are different. Subsystems own typed errors; a completed resolver may still return `ambiguous`, `unknown`, or `unsupported`. General error composition is acceptable at CLI/server startup boundaries, not as a replacement for public subsystem error contracts. See `docs/15-errors-and-diagnostics.md`.
@@ -229,7 +240,7 @@ Correctness regressions cannot be accepted in exchange for faster benchmarks wit
 ## Documentation rules
 
 - Keep documentation self-contained and suitable for a public GitHub repository.
-- Do not name or identify external source repositories in Rootline documentation.
+- Do not name or identify external source repositories in Rootline documentation, except for explicitly designated benchmark and evaluation material in `benchmarks/`, `docs/10-first-90-days.md`, `docs/11-benchmark-and-evaluation.md`, and dated implementation-tracker evidence.
 - Do not include copied external prose, comments, prompts, screenshots, visual assets, or distinctive UI text.
 - Label current behavior, accepted design, hypothesis, and future work clearly.
 - Link technical claims to tests, benchmarks, experiments, or ADRs when those artifacts exist.

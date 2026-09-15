@@ -2,7 +2,7 @@
 
 Rootline is a local-first software comprehension engine. It progressively turns a repository into a navigable mental model—from system and subsystem views through capabilities and flows to modules, files, symbols, and source lines—while preserving evidence, uncertainty, context, and a developer's learning state.
 
-The project is currently in the design stage. No production engine or client has been implemented yet.
+The first Rust implementation slice is underway: a repository-inventory engine and CLI exist. Python code intelligence and the product client have not been implemented yet.
 
 ## Product principles
 
@@ -26,6 +26,16 @@ Start with the [documentation index](docs/README.md). The most useful entry poin
 
 Agent working rules are in [AGENTS.md](AGENTS.md). Consequential architecture choices belong in [ADRs](docs/adrs/README.md); engineering learning and implementation rules live in [docs/engineering](docs/engineering/README.md).
 
+Current implementation status and a dated change history are in the [implementation tracker](docs/implementation-tracker.md). The pinned first benchmark is documented in [benchmarks/README.md](benchmarks/README.md).
+
 ## Current milestone
 
-The first engineering milestone is a benchmarked repository inventory and Python vertical slice: safe scanning, Tree-sitter structure extraction, normalized symbols and imports, evidence, persistence, CLI queries, and focused correctness tests. Crates, applications, and workspaces will be created only as their capabilities are implemented.
+The inventory CLI is the first completed slice. Run it with:
+
+```bash
+cargo run -p rootline-cli -- index <repository-root>
+```
+
+Git repositories use Git's tracked and untracked, ignore-aware listing; a non-Git directory uses a conservative walk that skips symlinks but does not yet apply ignore rules. The current CLI reports file categories, sizes, listing mode, Git revision where available, and skipped entries. It does not parse source, hash file content, or persist a graph yet.
+
+The next implementation slice is Python structure extraction through a language-neutral IR. Crates, applications, and workspaces are introduced only as their capabilities are implemented.
