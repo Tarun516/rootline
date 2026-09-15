@@ -19,23 +19,3 @@ The first Rust implementation slice is underway: a repository-inventory engine a
 One Git monorepo will contain a Cargo workspace for the Rust analysis engine and a pnpm workspace for a React/TypeScript/Vite client in `apps/web`. The client will communicate with the Rust-owned runtime through a local, versioned protocol and receive bounded graph projections rather than internal engine structs.
 
 The initial languages are Python and TypeScript. Tree-sitter adapters will normalize syntax into a Code Intelligence IR; language-aware resolvers will produce a provenance-aware fact graph persisted in SQLite. Semantic enrichment is optional and cannot mutate deterministic facts.
-
-## Documentation
-
-Start with the [documentation index](docs/README.md). The most useful entry points are the [product vision](docs/01-product-vision.md), [principles](docs/02-principles-and-boundaries.md), [target architecture](docs/04-target-architecture.md), [repository organization](docs/14-repository-organization.md), [capability roadmap](docs/09-capability-roadmap.md), and [first 90-day plan](docs/10-first-90-days.md).
-
-Agent working rules are in [AGENTS.md](AGENTS.md). Consequential architecture choices belong in [ADRs](docs/adrs/README.md); engineering learning and implementation rules live in [docs/engineering](docs/engineering/README.md).
-
-Current implementation status and a dated change history are in the [implementation tracker](docs/implementation-tracker.md). The pinned first benchmark is documented in [benchmarks/README.md](benchmarks/README.md).
-
-## Current milestone
-
-The inventory CLI is the first completed slice. Run it with:
-
-```bash
-cargo run -p rootline-cli -- index <repository-root>
-```
-
-Git repositories use Git's tracked and untracked, ignore-aware listing; a non-Git directory uses a conservative walk that skips symlinks but does not yet apply ignore rules. The current CLI reports file categories, sizes, listing mode, Git revision where available, and skipped entries. It does not parse source, hash file content, or persist a graph yet.
-
-The next implementation slice is Python structure extraction through a language-neutral IR. Crates, applications, and workspaces are introduced only as their capabilities are implemented.
