@@ -4,11 +4,13 @@
 
 Rootline should separate deterministic repository analysis, semantic interpretation, and interactive presentation through stable contracts. The deterministic engine owns truth production and maintenance. Semantic workers consume facts and produce explicitly identified inferences. The UI queries projections suited to the user's current abstraction level.
 
+The implementation will be one Git monorepo. Cargo owns the Rust workspace; pnpm owns the TypeScript workspace. The product client is a React/TypeScript/Vite application in `apps/web`, not a second full-stack server. A future public site is a separate application with its own framework decision.
+
 ## High-level system
 
 ```text
 +------------------------------------------------------+
-| TypeScript client                                    |
+| React + TypeScript + Vite client                     |
 |                                                      |
 | semantic zoom | graph canvas | source viewer         |
 | search | evidence inspector | learning state | views |
@@ -203,6 +205,20 @@ The client renders query projections rather than loading the entire graph. It ow
 - code/source display;
 - filtering, path tracing, and change overlays;
 - personal learning state and user-created views.
+
+Client code is feature-oriented. Fetched engine state and ephemeral canvas state remain separate. Protocol DTOs map into Rootline web-domain models, which then map into graph-library types; visualization-library types must not become frontend domain types.
+
+### Protocol and transport
+
+Internal Rust entities become bounded, versioned projection DTOs before reaching the client. A handshake reports engine and protocol versions so incompatible builds fail clearly. Add a server crate when the client needs transport. Axum/Tokio are candidates at that boundary; parsing, resolution, IR, and storage do not become asynchronous merely because transport is.
+
+Public protocol errors are stable and safe to display. Internal filesystem, database, backtrace, and source details remain in restricted diagnostics rather than raw browser responses.
+
+### Crate growth
+
+Begin with `rootline-core`, `rootline-engine`, and `rootline-cli` when implementation starts. Scanning, syntax, resolution, and graph construction can initially be modules inside the engine. Extract repository, analysis, store, protocol, and server crates only when their responsibilities and dependency boundaries become real. `rootline-core` contains durable domain types but no Tree-sitter, SQLite, Tokio, Axum, HTTP, UI, or model-provider dependencies.
+
+See [14-repository-organization.md](14-repository-organization.md) for detailed initial and target layouts.
 
 ## Runtime deployment for the initial product
 

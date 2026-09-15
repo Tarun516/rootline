@@ -19,6 +19,9 @@ This directory is the consolidated product and engineering plan for Rootline. It
 | [11-benchmark-and-evaluation.md](11-benchmark-and-evaluation.md) | Corpus, golden questions, correctness metrics, and performance budgets |
 | [12-engineering-operating-model.md](12-engineering-operating-model.md) | How the project should be built, measured, documented, and changed |
 | [13-risks-and-open-questions.md](13-risks-and-open-questions.md) | Known hard problems, uncertainty, mitigation, and likely pivots |
+| [14-repository-organization.md](14-repository-organization.md) | Cargo/pnpm monorepo, crate boundaries, frontend organization, and protocol DTOs |
+| [15-errors-and-diagnostics.md](15-errors-and-diagnostics.md) | Typed operational errors, analysis outcomes, diagnostics, public errors, and tracing |
+| [16-configuration-security-portability.md](16-configuration-security-portability.md) | Explicit configuration, local security, source privacy, and cross-platform behavior |
 | [glossary.md](glossary.md) | Shared terminology |
 | [adrs/README.md](adrs/README.md) | Architecture decision record process and index |
 | [engineering/README.md](engineering/README.md) | Engineering learning notebook and proposed topics |
@@ -46,3 +49,7 @@ Documentation is part of the engineering system:
 - Every capability phase defines measurable exit criteria.
 - Unsupported behavior and unresolved analysis are documented rather than hidden.
 - Documents should distinguish current behavior, committed design, hypotheses, and future possibilities.
+
+## Accepted implementation direction
+
+The product will be one Git monorepo with Cargo and pnpm workspaces. The product client will use React, TypeScript, and Vite in `apps/web`. Rust begins with a small concrete crate set and splits only at real boundaries. Core analysis remains runtime-agnostic; local transport, versioned DTOs, typed errors, analysis outcomes, diagnostics, and structured tracing have explicit boundaries. These decisions do not authorize placeholder scaffolding before a capability is requested.

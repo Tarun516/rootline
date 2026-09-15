@@ -27,4 +27,8 @@ Architecture decision records explain consequential choices and preserve the con
 
 ## Index
 
-No decisions have been accepted yet.
+| ADR | Decision |
+| --- | --- |
+| [0001-dual-workspace-monorepo.md](0001-dual-workspace-monorepo.md) | One Git repository with Cargo and pnpm workspaces; grow members only when needed |
+| [0002-product-client-and-versioned-protocol.md](0002-product-client-and-versioned-protocol.md) | React/TypeScript/Vite product client and versioned projection DTOs |
+| [0003-outcomes-errors-and-observability.md](0003-outcomes-errors-and-observability.md) | Typed operational errors, explicit analysis outcomes, diagnostics, and tracing |

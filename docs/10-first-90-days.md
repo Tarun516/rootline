@@ -14,6 +14,7 @@ This plan creates a serious vertical slice without treating the schedule as more
 - Define golden comprehension questions and expected answers.
 - Capture competing-tool baseline results on the same revisions.
 - Create the Rootline CLI/workspace skeleton only after core ADRs are drafted.
+- Initialize only the Cargo workspace members needed for the first vertical slice; introduce pnpm and `apps/web` when the UI phase begins.
 - Define benchmark output formats and repeatability rules.
 - Create ADR and engineering-notebook conventions.
 - Run focused spikes for safe scanning, Rust Tree-sitter integration, and SQLite access.
@@ -66,6 +67,7 @@ Audio Tensor Lab produces a stable, inspectable artifact and symbol graph with s
 - Supported call/reference candidates with conservative target resolution.
 - Local query API or IPC boundary.
 - Minimal TypeScript/React interface.
+- React/TypeScript/Vite client in `apps/web`, with a versioned handshake and bounded projection DTOs.
 - Repository, module/directory, file, and symbol navigation.
 - Source panel, breadcrumbs, and `you are here` context.
 - Analysis status and evidence display.

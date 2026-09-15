@@ -56,6 +56,8 @@ All design and implementation work must preserve these rules:
 
 ## Target architecture
 
+Rootline is one Git monorepo. Cargo manages Rust; pnpm manages the React/TypeScript/Vite product client in `apps/web`. Start with a small concrete crate set and add members only when their capabilities exist. Do not add a full-stack JavaScript server merely to proxy the Rust runtime.
+
 The intended direction is:
 
 ```text
@@ -81,6 +83,8 @@ Dependency direction matters:
 - Core IR and provenance types do not depend on UI, provider, or database libraries.
 - Semantic workers consume fact-graph projections and cannot mutate deterministic facts.
 - User views and learning state cannot mutate facts or inferred system concepts.
+- Client and engine exchange versioned projection DTOs, never arbitrary serialized internal structs.
+- Core analysis remains runtime-agnostic; async transport belongs at the server boundary.
 
 Any proposal that changes these boundaries requires an ADR.
 
@@ -131,6 +135,8 @@ After changing code:
 5. Update docs and add an ADR if a stable contract or architectural decision changed.
 
 ## Analysis result requirements
+
+Operational errors and analysis outcomes are different. Subsystems own typed errors; a completed resolver may still return `ambiguous`, `unknown`, or `unsupported`. General error composition is acceptable at CLI/server startup boundaries, not as a replacement for public subsystem error contracts. See `docs/15-errors-and-diagnostics.md`.
 
 An analysis operation must distinguish:
 
@@ -202,6 +208,8 @@ In particular:
 When the first Rust workspace is introduced, implement the machine-enforcement layer described in `docs/engineering/rust-engineering-rules.md` together with the code. Do not add placeholder Cargo/Clippy/CI configuration before a real Rust workspace exists.
 
 ## Testing and benchmarking
+
+Read `docs/14-repository-organization.md` and `docs/16-configuration-security-portability.md` before adding workspace members, a local server, or filesystem-sensitive behavior. Configuration enters through application boundaries and is passed explicitly. Local HTTP requires an authentication and Origin policy; loopback binding alone is insufficient. Do not log source code by default.
 
 Use pinned repositories and fixtures. Keep deterministic engine benchmarks separate from semantic-provider time and cost.
 
