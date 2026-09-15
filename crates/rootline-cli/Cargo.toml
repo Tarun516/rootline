@@ -9,6 +9,7 @@ name = "rootline"
 path = "src/main.rs"
 
 [dependencies]
+rootline-core = { path = "../rootline-core" }
 rootline-engine = { path = "../rootline-engine" }
 
 [lints]

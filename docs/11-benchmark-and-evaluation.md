@@ -176,3 +176,5 @@ benchmarks/
 ```
 
 Do not commit proprietary benchmark source. Store only allowed metadata, derived fixtures, and instructions for acquiring repositories.
+
+Implemented so far: `corpus.yaml` (pinned R0 revision and expected inventory counts), `expected/` (exact R0 path oracle), `runners/r0-inventory.sh` (portable acquisition, analysis, and scoring), and `results/` (local machine-readable run records). Golden questions, expected answers, fixtures, and reports remain future work; see `benchmarks/README.md` and the implementation tracker for current status.

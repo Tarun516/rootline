@@ -6,6 +6,11 @@ rust-version.workspace = true
 
 [dependencies]
 rootline-core = { path = "../rootline-core" }
+# Tree-sitter runtime plus the pinned Python grammar. `std` cannot parse
+# Python; the adapter converts these parser-specific types into owned
+# rootline-core IR at the module boundary, so neither type leaks further.
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
 
 [lints]
 workspace = true

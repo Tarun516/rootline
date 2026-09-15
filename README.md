@@ -2,7 +2,7 @@
 
 Rootline is a local-first software comprehension engine. It progressively turns a repository into a navigable mental model—from system and subsystem views through capabilities and flows to modules, files, symbols, and source lines—while preserving evidence, uncertainty, context, and a developer's learning state.
 
-The first Rust implementation slice is underway: a repository-inventory engine and CLI exist. Python code intelligence and the product client have not been implemented yet.
+The first Rust implementation slice is underway: a repository-inventory engine and CLI exist, along with Python code intelligence (a Tree-sitter adapter producing a language-neutral Code Intelligence IR, inspectable via `rootline symbols`). Import resolution, graph persistence, and the product client have not been implemented yet.
 
 ## Product principles
 

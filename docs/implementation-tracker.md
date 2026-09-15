@@ -6,15 +6,25 @@ This file records what has been implemented, when, how it was verified, and what
 
 | Capability | Status | Evidence or next gate |
 | --- | --- | --- |
-| Pinned R0 inventory oracle | Done | Clean archive of pinned revision: 40 files, 337,358 bytes, 0 skipped; portable acquisition and scored comprehension answers remain |
+| Pinned R0 inventory oracle | Done, reproducible | `benchmarks/runners/r0-inventory.sh` clones the pinned revision into an isolated temp dir, checks mode/revision/counts/ordering/exact paths, and writes a machine-readable record to `benchmarks/results/` |
 | Minimal Rust workspace | Done | Three real crates; pinned toolchain, lockfile, lint policy, CI, formatting/check/Clippy/tests passed locally |
 | First repository inventory CLI | Done with declared limits | Git ignore-aware listing, non-Git fallback, symlink checks, deterministic output; 4 tests and clean-archive benchmark passed |
-| Python Code Intelligence IR | Not started | Next implementation slice |
+| Python Code Intelligence IR | Done with declared limits | Owned IR in `rootline-core::ir` (typed coordinates, identities, outcomes, publication validation); Tree-sitter Python adapter with 4 fixtures and 7 tests; `rootline symbols` inspection; ADRs 0004/0005 |
 | Python import resolution and symbol graph | Not started | Requires IR |
 | SQLite and incremental engine | Not started | Requires fact graph |
 | React/TypeScript/Vite client | Not started | Requires local query protocol |
 
 ## Chronological log
+
+### 2026-09-15 11:47 IST — Reproducible R0 benchmark, toolchain update, Python IR slice
+
+- Implemented: `benchmarks/corpus.yaml` (R0 source, pinned revision, expected counts), `benchmarks/expected/r0-inventory.txt` (exact 40-path oracle), `benchmarks/runners/r0-inventory.sh` (fresh clone into isolated temp dir, HEAD/cleanliness verification, oracle checks, machine-readable `benchmarks/results/*.json` record), and an updated `benchmarks/README.md` acquisition procedure.
+- Implemented: language-neutral IR in `rootline-core::ir` plus a Tree-sitter Python adapter in `rootline-engine::python` (functions/classes/methods with lexical owners, per-module import facts, partial recovery with error locations), 4 fixtures under `fixtures/python/`, and `rootline symbols <python-file>` inspection. Added [ADR 0004](adrs/0004-code-intelligence-ir.md) (IR schema) and [ADR 0005](adrs/0005-tree-sitter-packaging.md) (Tree-sitter packaging).
+- Changed: pinned toolchain `1.85.0` → `1.98` to match the working laptop installation while keeping a pinned channel; `rust-version` MSRV stays `1.85`. Added `rootline-core` as a direct `rootline-cli` dependency for presentation types; `Clone`/`Hash` derived on `RepoPath` for symbol identity use.
+- Dependencies added with reason: `tree-sitter 0.25` + `tree-sitter-python 0.25` (`std` cannot parse Python; grammar crates keep versioning in Cargo; parser types contained in the adapter per ADR 0005). Pinned exactly in `Cargo.lock`.
+- Evidence: `benchmarks/runners/r0-inventory.sh` passed from a clean materialization (40 files, 337,358 bytes, 0 skipped, git-ignore-aware, exact paths, category counts 30/5/3/1/1); `cargo fmt --all -- --check`, `cargo check/clippy/test --workspace --all-targets --all-features --locked` passed (18 tests: 8 core IR, 7 Python adapter, 3 inventory).
+- Limitations: no parameters/decorators/calls/columns in the IR yet; `.pyi` stubs explicitly unsupported; adapter parses one file at a time with no bounded-parallelism design; symbol snapshot over the R0 corpus and scored comprehension answers remain future work.
+- Next gate: Python import resolution and symbol-graph construction on the IR.
 
 ### 2026-09-15 09:42 IST — Implementation kickoff
 

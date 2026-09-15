@@ -1,11 +1,15 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+pub mod ir;
+
 /// A lexical repository-relative path containing only normal components.
 ///
 /// This establishes a path-shape invariant, not a filesystem-boundary guarantee:
 /// the scanner checks each component for symlinks before accepting an artifact.
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// Cloning and hashing are supported because paths serve as symbol and graph
+/// identity components.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RepoPath(PathBuf);
 
 /// Why a repository-relative path could not establish its lexical invariant.

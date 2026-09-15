@@ -32,3 +32,5 @@ Architecture decision records explain consequential choices and preserve the con
 | [0001-dual-workspace-monorepo.md](0001-dual-workspace-monorepo.md) | One Git repository with Cargo and pnpm workspaces; grow members only when needed |
 | [0002-product-client-and-versioned-protocol.md](0002-product-client-and-versioned-protocol.md) | React/TypeScript/Vite product client and versioned projection DTOs |
 | [0003-outcomes-errors-and-observability.md](0003-outcomes-errors-and-observability.md) | Typed operational errors, explicit analysis outcomes, diagnostics, and tracing |
+| [0004-code-intelligence-ir.md](0004-code-intelligence-ir.md) | Owned language-neutral IR in `rootline-core` with typed coordinates, identities, and outcomes |
+| [0005-tree-sitter-packaging.md](0005-tree-sitter-packaging.md) | Tree-sitter runtime plus crates.io grammar crates contained inside language adapters |

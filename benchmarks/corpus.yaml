@@ -1,0 +1,27 @@
+# Pinned benchmark corpus for Rootline evaluation.
+#
+# Each entry pins an exact source revision so the same repository state can be
+# evaluated repeatedly for structural coverage, timing, and answer quality.
+# Only metadata and derived fixtures are stored here; benchmark source itself
+# is acquired separately at run time and never committed.
+#
+# See docs/11-benchmark-and-evaluation.md for metrics and methodology.
+
+version: 1
+
+repositories:
+  - id: R0
+    name: Audio Tensor Lab
+    role: Small Python repository understood deeply; daily correctness oracle.
+    source_url: https://github.com/Tarun516/audio-tensor-lab.git
+    pinned_revision: e750f443fd1f732e73e9cf9612d0e3b57c053a81
+    expected_inventory:
+      files: 40
+      bytes: 337358
+      skipped: 0
+      scanner_mode: git-ignore-aware
+      code: 30
+      config: 5
+      documentation: 3
+      data: 1
+      other: 1
